@@ -10,5 +10,9 @@ tinytuya.json
 devices.json
 snapshot.json
 tuya-raw.json
+init.sql
+smartlife.db
+smartlife.db-*
+collect.log
 
 .DS_Store

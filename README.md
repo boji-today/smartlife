@@ -18,6 +18,10 @@ cp .env.example .env
 | `TUYA_API_SECRET` | Access Secret |
 | `TUYA_API_REGION` | `cn` `us` `us-e` `eu` `eu-w` `in` `sg` |
 | `TUYA_DEVICE_ID` | App 里已注册的任意设备 ID，或 `scan` |
+| `COLLECT_CRON` | 五段 cron，默认 `*/5 * * * *` |
+| `COLLECT_ON_BOOT` | `1` 则 `collect.py` 启动时先采一次 |
+
+local key 不放 `.env`，和设备一一对应，写在 `smartlife.db` 的 `devices` 表。
 
 ## 拉取设备与 local key
 
@@ -49,3 +53,29 @@ set -a && source .env && set +a
 | 18 | `temp_current`（°C） |
 | 19 | `humidity_value`（%） |
 | 15 | `battery_percentage` |
+
+## 数据库
+
+`init.sql` 建 `devices`、`readings`，并写入当前这台检测仪（含 local key）。该文件不提交。
+
+```bash
+sqlite3 smartlife.db < init.sql
+```
+
+`devices`：`id`、`name`、`address`、`version`、`product_id`、`category`、`mac`、`local_key`、`updated_at`。
+
+`readings`：`device_id`、`ts`（UTC）、`co2_ppm`、`co2_state`、`temp_c`、`humidity`、`battery`、`raw_json`。
+
+## 采集
+
+`collect.py` 是常驻进程，按 `COLLECT_CRON` 对齐到整分钟。读 `devices` 里每一台，用本地协议取状态后写入 `readings`。失败、库不存在或没有设备时只追加 `collect.log`，不插入读数。醒来时若已错过该整点，记 `missed`，不补写。
+
+```bash
+.venv/bin/python collect.py
+```
+
+单次读取当前二氧化碳：
+
+```bash
+.venv/bin/python test_co2.py
+```
