@@ -20,8 +20,9 @@ cp .env.example .env
 | `TUYA_DEVICE_ID` | App 里已注册的任意设备 ID，或 `scan` |
 | `COLLECT_CRON` | 五段 cron，默认 `*/5 * * * *` |
 | `COLLECT_ON_BOOT` | `1` 则 `collect.py` 启动时先采一次 |
+| `HTTP_PORT` | Infinity HTTP 端口，默认 `8080` |
 
-local key 不放 `.env`，和设备一一对应，写在 `smartlife.db` 的 `devices` 表。
+local key 不放 `.env`，和设备一一对应，写在 `data/smartlife.db` 的 `devices` 表。
 
 ## 拉取设备与 local key
 
@@ -59,7 +60,7 @@ set -a && source .env && set +a
 `init.sql` 建 `devices`、`readings`，并写入当前这台检测仪（含 local key）。该文件不提交。
 
 ```bash
-sqlite3 smartlife.db < init.sql
+mkdir -p data && sqlite3 data/smartlife.db < init.sql
 ```
 
 `devices`：`id`、`name`、`address`、`version`、`product_id`、`category`、`mac`、`local_key`、`updated_at`。
@@ -80,7 +81,13 @@ sqlite3 smartlife.db < init.sql
 docker compose -f compose.yml up -d --build
 ```
 
-容器名 `smartlife`，接入 Docker 默认 `bridge` 网络。`env_file` 读 `.env`，当前目录的 `smartlife.db` 挂到 `/app/smartlife.db`。镜像内不含密钥和数据库。
+容器名 `smartlife`，接入 Docker 默认 `bridge` 网络。`./data` 挂到 `/app/data`，库文件为 `data/smartlife.db`，WAL 与库在同一目录。`HTTP_PORT` 写入容器环境，监听端口与发布端口一致，默认 `8080`。`env_file` 读 `.env`。镜像内不含密钥和数据库。入口仍是 `python -u collect.py`。
+
+## Infinity
+
+`GET /health`。`GET /readings?from=${__from}&to=${__to}`，可加 `device_id`。`from` / `to` 为 Unix 毫秒或 UTC ISO8601（`Z` 或 `+00:00`），缺省最近 24 小时。响应是按 `ts` 升序的对象数组，不含 local key。
+
+Grafana Infinity：类型 JSON，Parser Backend，Format Time series。同 `bridge` 网络 URL 为 `http://smartlife:8080/readings?from=${__from}&to=${__to}`，宿主机用映射端口。列：`ts` Time，`co2_ppm` `temp_c` `humidity` `battery` Number，`device_id` `co2_state` String。
 
 单次读取当前二氧化碳：
 

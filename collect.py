@@ -1,14 +1,17 @@
 import json
 import os
 import sqlite3
+import threading
 import time
 from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 import tinytuya
 
 ROOT = Path(__file__).resolve().parent
-DB = ROOT / "smartlife.db"
+DB = ROOT / "data" / "smartlife.db"
 LOG = ROOT / "collect.log"
 
 
@@ -31,12 +34,19 @@ def log_error(msg):
         f.write(f"{ts} {msg}\n")
 
 
+def connect():
+    conn = sqlite3.connect(DB, timeout=5)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL").fetchone()
+    return conn
+
+
 def collect():
     if not DB.exists():
         log_error("smartlife.db not found")
         return
     try:
-        conn = sqlite3.connect(DB)
+        conn = connect()
     except Exception as exc:
         log_error(f"collect {exc}")
         return
@@ -152,11 +162,121 @@ def next_run(expr, now):
     raise SystemExit("no matching cron time")
 
 
+def parse_query(query):
+    params = {}
+    for part in query.split("&"):
+        if not part:
+            continue
+        key, sep, value = part.partition("=")
+        if not sep:
+            value = ""
+        params.setdefault(unquote(key), []).append(unquote(value))
+    return params
+
+
+def parse_time(value, default):
+    if value is None or value == "":
+        return default
+    if value.isdigit():
+        dt = datetime.fromtimestamp(int(value) / 1000, timezone.utc)
+    else:
+        text = value[:-1] + "+00:00" if value.endswith("Z") else value
+        dt = datetime.fromisoformat(text)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            dt = dt.astimezone(timezone.utc)
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def query_readings(qs):
+    now = datetime.now(timezone.utc)
+    default_to = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    default_from = (now - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        start = parse_time((qs.get("from") or [None])[0], default_from)
+        end = parse_time((qs.get("to") or [None])[0], default_to)
+    except (ValueError, OSError, OverflowError):
+        return 400, {"error": "bad time"}
+    device_id = (qs.get("device_id") or [None])[0] or None
+    if not DB.exists():
+        return 503, {"error": "smartlife.db not found"}
+    try:
+        conn = connect()
+    except Exception as exc:
+        log_error(f"readings {exc}")
+        return 503, {"error": "database"}
+    try:
+        sql = """
+            SELECT device_id, ts, co2_ppm, co2_state, temp_c, humidity, battery
+            FROM readings
+            WHERE ts >= ? AND ts <= ?
+        """
+        args = [start, end]
+        if device_id:
+            sql += " AND device_id = ?"
+            args.append(device_id)
+        sql += " ORDER BY ts ASC"
+        rows = conn.execute(sql, args).fetchall()
+    except Exception as exc:
+        log_error(f"readings {exc}")
+        return 503, {"error": "database"}
+    finally:
+        conn.close()
+    return 200, [
+        {
+            "ts": row["ts"],
+            "device_id": row["device_id"],
+            "co2_ppm": row["co2_ppm"],
+            "co2_state": row["co2_state"],
+            "temp_c": row["temp_c"],
+            "humidity": row["humidity"],
+            "battery": row["battery"],
+        }
+        for row in rows
+    ]
+
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        if parsed.path == "/health":
+            self._send(200, {"status": "ok"})
+            return
+        if parsed.path == "/readings":
+            code, body = query_readings(parse_query(parsed.query))
+            self._send(code, body)
+            return
+        self._send(404, {"error": "not found"})
+
+    def _send(self, code, body):
+        data = json.dumps(body, ensure_ascii=False).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, fmt, *args):
+        print(f"{self.address_string()} {fmt % args}", flush=True)
+
+
+def start_http():
+    raw = os.environ.get("HTTP_PORT", "8080").strip()
+    if not raw.isdigit():
+        raise SystemExit("HTTP_PORT must be an integer")
+    port = int(raw)
+    httpd = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+    print(f"listen 0.0.0.0:{port}", flush=True)
+    threading.Thread(target=httpd.serve_forever, name="http", daemon=True).start()
+
+
 def main():
     load_dotenv()
     cron = os.environ.get("COLLECT_CRON", "").strip()
     if len(cron.split()) != 5:
         raise SystemExit("COLLECT_CRON must have 5 fields")
+    start_http()
     if os.environ.get("COLLECT_ON_BOOT", "0").strip() == "1":
         collect()
     while True:
