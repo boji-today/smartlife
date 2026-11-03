@@ -1,0 +1,11 @@
+.venv
+.env
+*.db
+*.db-*
+init.sql
+collect.log
+devices.json
+snapshot.json
+tuya-raw.json
+tinytuya.json
+.git

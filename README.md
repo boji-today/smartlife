@@ -74,6 +74,14 @@ sqlite3 smartlife.db < init.sql
 .venv/bin/python collect.py
 ```
 
+或：
+
+```bash
+docker compose -f compose.yml up -d --build
+```
+
+容器名 `smartlife`，接入 Docker 默认 `bridge` 网络。`env_file` 读 `.env`，当前目录的 `smartlife.db` 挂到 `/app/smartlife.db`。镜像内不含密钥和数据库。
+
 单次读取当前二氧化碳：
 
 ```bash

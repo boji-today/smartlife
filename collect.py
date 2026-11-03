@@ -13,6 +13,8 @@ LOG = ROOT / "collect.log"
 
 
 def load_dotenv(path=ROOT / ".env"):
+    if not path.exists():
+        return
     for line in path.read_text().splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
