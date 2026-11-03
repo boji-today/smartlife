@@ -87,7 +87,7 @@ Docker：
 docker compose -f compose.yml up -d --build
 ```
 
-容器名 `smartlife`，接入 Docker 默认 `bridge`。`env_file` 读 `.env`，并把 `HTTP_PORT` 传入容器，默认 `8080`。`./data` 挂到 `/app/data`，库文件为 `data/smartlife.db`，WAL 与库在同一目录。镜像入口是 `python -u collect.py`，不含密钥和数据库。查询通过 `bridge` 上的容器名访问。
+容器名 `smartlife`，接入已有的 `grafana` 网络。`env_file` 读 `.env`，并把 `HTTP_PORT` 传入容器，默认 `8080`。`./data` 挂到 `/app/data`，库文件为 `data/smartlife.db`，WAL 与库在同一目录。镜像入口是 `python -u collect.py`，不含密钥和数据库。查询通过该网络上的容器名访问。
 
 ## Infinity
 
@@ -98,7 +98,7 @@ docker compose -f compose.yml up -d --build
 
 `from` / `to` 为 Unix 毫秒或 UTC ISO8601（`Z` 或 `+00:00`），缺省最近 24 小时。响应按 `ts` 升序，不含 local key 与 `raw_json`。
 
-Grafana 与容器同在 `bridge` 时，Infinity 使用类型 JSON、Parser Backend、Format Time series。URL：
+Grafana 与容器同在 `grafana` 网络时，Infinity 使用类型 JSON、Parser Backend、Format Time series。URL：
 
 ```text
 http://smartlife:8080/readings?from=${__from}&to=${__to}

@@ -11,4 +11,10 @@ services:
     volumes:
       - ./data:/app/data
     restart: unless-stopped
-    network_mode: bridge
+    networks:
+      - grafana
+
+networks:
+  grafana:
+    external: true
+    name: grafana
