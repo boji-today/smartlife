@@ -75,22 +75,33 @@ mkdir -p data && sqlite3 data/smartlife.db < init.sql
 .venv/bin/python collect.py
 ```
 
-或：
-
-```bash
-docker compose -f compose.yml up -d --build
-```
-
-容器名 `smartlife`，接入 Docker 默认 `bridge` 网络。`./data` 挂到 `/app/data`，库文件为 `data/smartlife.db`，WAL 与库在同一目录。`HTTP_PORT` 写入容器环境，监听端口与发布端口一致，默认 `8080`。`env_file` 读 `.env`。镜像内不含密钥和数据库。入口仍是 `python -u collect.py`。
-
-## Infinity
-
-`GET /health`。`GET /readings?from=${__from}&to=${__to}`，可加 `device_id`。`from` / `to` 为 Unix 毫秒或 UTC ISO8601（`Z` 或 `+00:00`），缺省最近 24 小时。响应是按 `ts` 升序的对象数组，不含 local key。
-
-Grafana Infinity：类型 JSON，Parser Backend，Format Time series。同 `bridge` 网络 URL 为 `http://smartlife:8080/readings?from=${__from}&to=${__to}`，宿主机用映射端口。列：`ts` Time，`co2_ppm` `temp_c` `humidity` `battery` Number，`device_id` `co2_state` String。
-
 单次读取当前二氧化碳：
 
 ```bash
 .venv/bin/python test_co2.py
 ```
+
+Docker：
+
+```bash
+docker compose -f compose.yml up -d --build
+```
+
+容器名 `smartlife`，接入 Docker 默认 `bridge`。`env_file` 读 `.env`，并把 `HTTP_PORT` 传入容器，默认 `8080`。`./data` 挂到 `/app/data`，库文件为 `data/smartlife.db`，WAL 与库在同一目录。镜像入口是 `python -u collect.py`，不含密钥和数据库。查询通过 `bridge` 上的容器名访问。
+
+## Infinity
+
+同一进程提供：
+
+- `GET /health`
+- `GET /readings?from=${__from}&to=${__to}`，可加 `device_id`
+
+`from` / `to` 为 Unix 毫秒或 UTC ISO8601（`Z` 或 `+00:00`），缺省最近 24 小时。响应按 `ts` 升序，不含 local key 与 `raw_json`。
+
+Grafana 与容器同在 `bridge` 时，Infinity 使用类型 JSON、Parser Backend、Format Time series。URL：
+
+```text
+http://smartlife:8080/readings?from=${__from}&to=${__to}
+```
+
+列：`ts` Time，`co2_ppm` `temp_c` `humidity` `battery` Number，`device_id` `co2_state` String。
