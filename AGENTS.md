@@ -1,26 +1,15 @@
 # Agent 约定
 
-本地 TinyTuya 项目。用 `.venv/bin/python`，不要装到系统 Python。依赖为 tinytuya 1.20.0。
+用 `.venv/bin/python`。tinytuya 固定 1.20.0，与镜像一致，不要装到系统 Python。
 
 ## 密钥
 
-- 凭据只放 `.env`（模板是 `.env.example`）。
-- 不要提交、打印或写进文档：API Secret、local key，以及 `.env`、`tinytuya.json`、`devices.json`、`tuya-raw.json`、`snapshot.json`。
+不要打印、提交或写进文档：API Secret、local key，以及 `.env`、`init.sql`、`tinytuya.json`、`devices.json`、`tuya-raw.json`、`snapshot.json`、`data/smartlife.db`。
 
-## 网络
+## 操作
 
-- 网卡和网段见 `AGENTS.local.md`。
-- 扫描前确认网卡地址，发现广播只从真实网卡发出。不要依赖 tinytuya 默认选路；TUN/代理会导致广播失败并扫到 0 台设备。
-- Wi-Fi 扫描要绑定实际网卡，广播到该网段的广播地址。监听端口是 6666 / 6667 / 7000，会收到其他网卡上的广播。
-- 局域网扫描不能在沙箱网络里做。
-- 没有 `devices.json` 时不要指望 `-force`；tinytuya 会关掉 force-scan。
-
-## Wizard
-
-读取 `.env` 后调用 `wizard`，带上 `-nocolor -yes` 以及 `-key`、`-secret`、`-region`、`-device`。区域未开通时云端返回 `PROJECT`（data center suspended），不要改密钥去猜区域。
-
-## 已知设备
-
-二氧化碳检测仪，category `co2bj`。地址、product 和 id 见 `AGENTS.local.md`。
-
-DPS：`2` co2 ppm，`1` co2_state，`18` 温度 °C，`19` 湿度，`15` 电量。读状态用 `devices.json` 里的 local key，不要把 key 回写到仓库。
+- 局域网扫描必须在沙箱外做。监听 6666 / 6667 / 7000 会收到其他网卡上的广播。
+- 云端 `PROJECT`（data center suspended）时不要改密钥去猜区域。
+- 查 `data/smartlife.db` 用 `file:<绝对路径>?immutable=1`。普通打开会因 WAL 在沙箱里失败（错误 14）。
+- 本机 `collect.py` 与容器不要同时跑，否则同一时段会各插入一行。
+- `readings.ts` 是 `device.status()` 返回后的 UTC 秒，不是 cron 整点。
