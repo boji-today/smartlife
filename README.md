@@ -57,10 +57,10 @@ set -a && source .env && set +a
 
 ## 数据库
 
-`init.sql` 建 `devices`、`readings`，并写入当前这台检测仪（含 local key）。该文件不提交。
+`schema.sql` 建 `devices`、`readings` 及索引，提交仓库。`data.sql` 写入当前这台检测仪（含 local key），不提交。
 
 ```bash
-mkdir -p data && sqlite3 data/smartlife.db < init.sql
+mkdir -p data && cat schema.sql data.sql | sqlite3 data/smartlife.db
 ```
 
 `devices`：`id`、`name`、`address`、`version`、`product_id`、`category`、`mac`、`local_key`、`updated_at`。

@@ -10,7 +10,7 @@ tinytuya.json
 devices.json
 snapshot.json
 tuya-raw.json
-init.sql
+data.sql
 smartlife.db
 smartlife.db-*
 collect.log

@@ -4,7 +4,7 @@
 
 ## 密钥
 
-不要打印、提交或写进文档：API Secret、local key，以及 `.env`、`init.sql`、`tinytuya.json`、`devices.json`、`tuya-raw.json`、`snapshot.json`、`data/smartlife.db`。
+不要打印、提交或写进文档：API Secret、local key，以及 `.env`、`data.sql`、`tinytuya.json`、`devices.json`、`tuya-raw.json`、`snapshot.json`、`data/smartlife.db`。
 
 ## 操作
 
