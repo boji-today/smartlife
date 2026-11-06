@@ -4,7 +4,7 @@
 
 ## 密钥
 
-不要打印、提交或写进文档：API Secret、local key，以及 `.env`、`data.sql`、`tinytuya.json`、`devices.json`、`tuya-raw.json`、`snapshot.json`、`data/smartlife.db`。
+不要打印、提交或写进文档：API Secret、local key、`HA_TOKEN`，以及 `.env`、`data.sql`、`tinytuya.json`、`devices.json`、`tuya-raw.json`、`snapshot.json`、`data/smartlife.db`。
 
 ## 操作
 
@@ -13,3 +13,4 @@
 - 查 `data/smartlife.db` 用 `file:<绝对路径>?immutable=1`。普通打开会因 WAL 在沙箱里失败（错误 14）。
 - 本机 `collect.py` 与容器不要同时跑，否则同一时段会各插入一行。
 - `readings.ts` 是 `device.status()` 返回后的 UTC 秒，不是 cron 整点。
+- 跑 `ha_probe.py` 必须在沙箱外并绕过 HTTP 代理。令牌没有只读范围，禁止 `POST /api/services` 和 `call_service`。

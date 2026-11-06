@@ -1,7 +1,7 @@
 # 长连接探测：只打印推送，限时退出。不写库，不提供 HTTP。
 # TODO: 改用 tinytuya.Monitor，心跳 12 秒，auto_reconnect，退避 60 秒，连接超时 3 秒。
 # TODO: 连上和重连成功后各 status() 一次，填满内存快照。
-# TODO: 部分 DPS 并入快照；co2、状态、温湿度、电量有变化才插入 readings。
+# TODO: 部分 DPS 并入快照；co2、状态、温湿度、电量有变化才插入 readings。device_id 写 devices.id，并冗余 source、biz_id。
 # TODO: raw_json 存合并后的 dps，不为 7、13、31、101、102 加列。
 # TODO: 与 collect.py 或容器不要同时连接同一台设备。
 
@@ -33,7 +33,7 @@ def load_device():
     conn = sqlite3.connect(uri, uri=True)
     try:
         rows = conn.execute(
-            "SELECT id, address, version, local_key FROM devices"
+            "SELECT biz_id, address, version, local_key FROM devices WHERE source = 'tuya'"
         ).fetchall()
     finally:
         conn.close()

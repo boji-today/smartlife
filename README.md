@@ -1,6 +1,6 @@
 # smartlife
 
-用 [tinytuya](https://github.com/jasonacox/tinytuya) 在局域网发现并读取 Tuya / Smart Life 设备。
+用 [tinytuya](https://github.com/jasonacox/tinytuya) 在局域网发现并读取 Tuya / Smart Life 设备，并用 `ha_probe.py` 只读查询 Home Assistant。
 
 ## 环境
 
@@ -21,6 +21,8 @@ cp .env.example .env
 | `COLLECT_CRON` | 五段 cron，默认 `*/5 * * * *` |
 | `COLLECT_ON_BOOT` | `1` 则 `collect.py` 启动时先采一次 |
 | `HTTP_PORT` | Infinity HTTP 端口，默认 `8080` |
+| `HA_URL` | Home Assistant 实例根地址 |
+| `HA_TOKEN` | 个人资料页创建的长期访问令牌 |
 
 local key 不放 `.env`，和设备一一对应，写在 `data/smartlife.db` 的 `devices` 表。
 
@@ -45,7 +47,9 @@ set -a && source .env && set +a
 
 ## 当前设备
 
-二氧化碳检测仪。地址、id 和 product 见 `AGENTS.local.md`。
+二氧化碳检测仪，`source=tuya`。地址、`biz_id` 和 product 见 `AGENTS.local.md`。
+
+餐厅米家智能温湿度计3 mini 已在 `devices`（`source=ha`）。采集尚未实现。
 
 | DPS | 含义 |
 |---|---|
@@ -63,19 +67,19 @@ set -a && source .env && set +a
 mkdir -p data && cat schema.sql data.sql | sqlite3 data/smartlife.db
 ```
 
-`devices`：`id`、`name`、`address`、`version`、`product_id`、`category`、`mac`、`local_key`、`updated_at`。
+`devices`：自增 `id`。`source` 与 `biz_id` 组成唯一键。`biz_name` 是原名称，`name` 供 Infinity 过滤。`source` 为 `tuya` 或 `ha`。`address`、`version`、`local_key` 可空。
 
-`readings`：`device_id`、`ts`（UTC）、`co2_ppm`、`co2_state`、`temp_c`、`humidity`、`battery`、`raw_json`。
+`readings`：`device_id` 是 `devices.id`，并冗余 `source`、`biz_id`。其余为 `ts`（UTC）、`co2_ppm`、`co2_state`、`temp_c`、`humidity`、`battery`、`raw_json`。
 
 ## 采集
 
-`collect.py` 是常驻进程，按 `COLLECT_CRON` 对齐到整分钟。读 `devices` 里每一台，用本地协议取状态后写入 `readings`。失败、库不存在或没有设备时只追加 `collect.log`，不插入读数。醒来时若已错过该整点，记 `missed`，不补写。
+`collect.py` 是常驻进程，按 `COLLECT_CRON` 对齐到整分钟。`source=tuya` 的行用 `biz_id` 走本地协议，写入 `readings` 时带上 `devices.id`、`source`、`biz_id`。`source=ha` 尚未采集。失败、库不存在或没有设备时只追加 `collect.log`，不插入读数。醒来时若已错过该整点，记 `missed`，不补写。
 
 ```bash
 .venv/bin/python collect.py
 ```
 
-`collect2.py` 是限时长连接探测。只读 `devices` 里唯一一台设备，保持 TCP，大约每 12 秒发心跳，把设备主动推送的 DPS 打到标准输出。不写 `readings`，不提供 HTTP。默认听 600 秒。与 `collect.py` 或容器不要同时连接同一台设备。断线重连、内存快照和落库尚未实现，见脚本顶部 TODO。
+`collect2.py` 是限时长连接探测。只读 `devices` 里 `source=tuya` 的设备，保持 TCP，大约每 12 秒发心跳，把设备主动推送的 DPS 打到标准输出。不写 `readings`，不提供 HTTP。默认听 600 秒。与 `collect.py` 或容器不要同时连接同一台设备。断线重连、内存快照和落库尚未实现，见脚本顶部 TODO。
 
 ```bash
 .venv/bin/python collect2.py
@@ -101,14 +105,28 @@ docker compose -f compose.yml up -d --build
 同一进程提供：
 
 - `GET /health`
-- `GET /readings?from=${__from}&to=${__to}`，可加 `device_id`
+- `GET /readings?from=${__from}&to=${__to}`，可加 `name`、`source`
 
-`from` / `to` 为 Unix 毫秒或 UTC ISO8601（`Z` 或 `+00:00`），缺省最近 24 小时。响应按 `ts` 升序，不含 local key 与 `raw_json`。
+`from` / `to` 为 Unix 毫秒或 UTC ISO8601（`Z` 或 `+00:00`），缺省最近 24 小时。`name` 对应 `devices.name`，`source` 对应 `readings.source`，缺省不过滤。响应按 `ts` 升序，含 `name`、`source`，不含 `device_id`、`biz_id`、local key 与 `raw_json`。
 
 Grafana 与容器同在 `grafana` 网络时，Infinity 使用类型 JSON、Parser Backend、Format Time series。URL：
 
 ```text
-http://smartlife:8080/readings?from=${__from}&to=${__to}
+http://smartlife:8080/readings?from=${__from}&to=${__to}&name=米家智能温湿度计3 mini&source=ha
 ```
 
-列：`ts` Time，`co2_ppm` `temp_c` `humidity` `battery` Number，`device_id` `co2_state` String。
+`source=ha` 尚未采集，这条目前为空。已有数据：
+
+```text
+http://smartlife:8080/readings?from=${__from}&to=${__to}&name=二氧化碳检测仪&source=tuya
+```
+
+列：`ts` Time，`co2_ppm` `temp_c` `humidity` `battery` Number，`name` `source` `co2_state` String。
+
+## Home Assistant
+
+`ha_probe.py` 读 `.env`，以及 `devices` 里 `source=ha` 的行。`biz_id` 是 HA device id，输出标题用 `name`。只做 `GET /api/`、`GET /api/states`，以及 WebSocket 的 `config/area_registry/list`、`config/floor_registry/list`、`config/entity_registry/list`、`config/device_registry/list`。不调用服务，不落盘。
+
+```bash
+.venv/bin/python ha_probe.py
+```

@@ -5,10 +5,11 @@ import base64
 import json
 import os
 import socket
+import sqlite3
 import struct
 import urllib.error
 import urllib.request
-from collections import Counter
+from pathlib import Path
 from urllib.parse import urlparse
 
 ALLOWED_WS = (
@@ -17,9 +18,6 @@ ALLOWED_WS = (
     "config/entity_registry/list",
     "config/device_registry/list",
 )
-
-XIAOMI_HINTS = ("xiaomi", "miot", "miio", "mijia")
-
 
 def load_env(path=".env"):
     if os.path.exists(path):
@@ -218,9 +216,26 @@ def ws_lists(url, token):
     return named
 
 
-def is_xiaomi(platform):
-    text = (platform or "").lower()
-    return any(hint in text for hint in XIAOMI_HINTS)
+def load_ha_devices():
+    db = Path(__file__).resolve().parent / "data" / "smartlife.db"
+    if not db.exists():
+        raise SystemExit("smartlife.db not found")
+    uri = f"file:{db}?immutable=1"
+    conn = sqlite3.connect(uri, uri=True)
+    try:
+        rows = conn.execute(
+            """
+            SELECT biz_id, name
+            FROM devices
+            WHERE source = 'ha'
+            ORDER BY id
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+    if not rows:
+        raise SystemExit("ha device not found")
+    return rows
 
 
 def area_name(entry, devices, areas):
@@ -255,75 +270,36 @@ def main():
             devices[device.get("id")] = device
 
     entities = registries.get("config/entity_registry/list") or []
-    by_entity = {}
-    platform_counts = Counter()
-    xiaomi_domains = Counter()
-    if isinstance(entities, list):
-        for entry in entities:
-            by_entity[entry.get("entity_id")] = entry
-            platform = entry.get("platform") or ""
-            if platform:
-                platform_counts[platform] += 1
-            if is_xiaomi(platform):
-                domain = (entry.get("entity_id") or "").split(".", 1)[0]
-                xiaomi_domains[domain] += 1
-
-    domain_counts = Counter(
-        (row.get("entity_id") or "").split(".", 1)[0] for row in states
-    )
+    if isinstance(entities, dict):
+        raise SystemExit(f"entities: {entities.get('error', 'failed')}")
+    by_device = {}
+    for entry in entities:
+        by_device.setdefault(entry.get("device_id"), []).append(entry)
     state_by_id = {row.get("entity_id"): row for row in states}
 
     print(f"ha {registries.get('ha_version') or '?'}")
-    print(
-        "domains "
-        + " ".join(f"{name}={count}" for name, count in domain_counts.most_common())
-    )
-    if xiaomi_domains:
-        print(
-            "xiaomi "
-            + " ".join(f"{name}={count}" for name, count in xiaomi_domains.most_common())
-        )
-    else:
-        top = ", ".join(
-            f"{name}={count}" for name, count in platform_counts.most_common(8)
-        )
-        print(f"platforms {top}")
-    print("rooms " + ", ".join(sorted(areas.values())))
-
-    def lines(domain):
-        rows = []
-        for entity_id, state in state_by_id.items():
-            if not entity_id or not entity_id.startswith(domain + "."):
-                continue
-            entry = by_entity.get(entity_id, {})
+    for biz_id, name in load_ha_devices():
+        print(f"{name}\t{biz_id}")
+        lines = []
+        for entry in by_device.get(biz_id) or []:
+            entity_id = entry.get("entity_id") or ""
+            state = state_by_id.get(entity_id) or {}
             attrs = state.get("attributes") or {}
-            name = attrs.get("friendly_name") or entity_id
-            room = area_name(entry, devices, areas)
-            rows.append((room, name, state, attrs, entity_id))
-        rows.sort(key=lambda item: (item[0], item[1]))
-        return rows
-
-    print("lights")
-    for room, name, state, _attrs, _entity_id in lines("light"):
-        print(f"  {room or '-'}\t{name}\t{state.get('state')}")
-
-    print("climates")
-    for room, name, state, attrs, _entity_id in lines("climate"):
-        mode = attrs.get("hvac_mode") or state.get("state")
-        action = attrs.get("hvac_action") or ""
-        current = attrs.get("current_temperature")
-        target = attrs.get("temperature")
-        extra = " ".join(
-            part
-            for part in (
-                mode or "",
-                action,
-                f"now={current}" if current is not None else "",
-                f"set={target}" if target is not None else "",
+            kind = attrs.get("device_class") or entity_id.split(".", 1)[0]
+            unit = attrs.get("unit_of_measurement") or ""
+            value = state.get("state")
+            shown = f"{value} {unit}".strip() if value is not None else ""
+            lines.append(
+                (
+                    area_name(entry, devices, areas),
+                    kind,
+                    attrs.get("friendly_name") or entity_id,
+                    shown,
+                )
             )
-            if part
-        )
-        print(f"  {room or '-'}\t{name}\t{extra}")
+        lines.sort()
+        for room, kind, friendly, shown in lines:
+            print(f"  {room or '-'}\t{kind}\t{friendly}\t{shown}")
 
 
 if __name__ == "__main__":

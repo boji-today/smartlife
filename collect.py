@@ -52,28 +52,42 @@ def collect():
         return
     try:
         rows = conn.execute(
-            "SELECT id, address, version, local_key FROM devices"
+            """
+            SELECT id, biz_id, source, address, version, local_key
+            FROM devices
+            """
         ).fetchall()
         if not rows:
             log_error("device not found")
             return
-        for dev_id, address, version, local_key in rows:
-            result = read_status(dev_id, address, version, local_key)
+        for row in rows:
+            source = row["source"]
+            biz_id = row["biz_id"]
+            if source == "ha":
+                # TODO: 用 biz_id 只读拉取 HA 状态并写入 readings。禁止服务调用。
+                continue
+            if source != "tuya":
+                log_error(f"unknown source {source}")
+                continue
+            result = read_status(biz_id, row["address"], row["version"], row["local_key"])
             if result is None:
                 continue
             dps = result.get("dps")
             if not dps:
-                log_error(f"{dev_id} no dps")
+                log_error(f"{biz_id} no dps")
                 continue
             ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             conn.execute(
                 """
                 INSERT INTO readings (
-                  device_id, ts, co2_ppm, co2_state, temp_c, humidity, battery, raw_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                  device_id, source, biz_id, ts,
+                  co2_ppm, co2_state, temp_c, humidity, battery, raw_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    dev_id,
+                    row["id"],
+                    source,
+                    biz_id,
                     ts,
                     dps.get("2"),
                     dps.get("1"),
@@ -84,7 +98,7 @@ def collect():
                 ),
             )
             conn.commit()
-            print(f"{ts} {dev_id} co2_ppm={dps.get('2')}", flush=True)
+            print(f"{ts} {biz_id} co2_ppm={dps.get('2')}", flush=True)
     except Exception as exc:
         log_error(f"collect {exc}")
     finally:
@@ -198,7 +212,8 @@ def query_readings(qs):
         end = parse_time((qs.get("to") or [None])[0], default_to)
     except (ValueError, OSError, OverflowError):
         return 400, {"error": "bad time"}
-    device_id = (qs.get("device_id") or [None])[0] or None
+    name = (qs.get("name") or [None])[0] or None
+    source = (qs.get("source") or [None])[0] or None
     if not DB.exists():
         return 503, {"error": "smartlife.db not found"}
     try:
@@ -208,15 +223,19 @@ def query_readings(qs):
         return 503, {"error": "database"}
     try:
         sql = """
-            SELECT device_id, ts, co2_ppm, co2_state, temp_c, humidity, battery
-            FROM readings
-            WHERE ts >= ? AND ts <= ?
+            SELECT d.name, r.source, r.ts, r.co2_ppm, r.co2_state, r.temp_c, r.humidity, r.battery
+            FROM readings r
+            JOIN devices d ON d.id = r.device_id
+            WHERE r.ts >= ? AND r.ts <= ?
         """
         args = [start, end]
-        if device_id:
-            sql += " AND device_id = ?"
-            args.append(device_id)
-        sql += " ORDER BY ts ASC"
+        if name:
+            sql += " AND d.name = ?"
+            args.append(name)
+        if source:
+            sql += " AND r.source = ?"
+            args.append(source)
+        sql += " ORDER BY r.ts ASC"
         rows = conn.execute(sql, args).fetchall()
     except Exception as exc:
         log_error(f"readings {exc}")
@@ -226,7 +245,8 @@ def query_readings(qs):
     return 200, [
         {
             "ts": row["ts"],
-            "device_id": row["device_id"],
+            "name": row["name"],
+            "source": row["source"],
             "co2_ppm": row["co2_ppm"],
             "co2_state": row["co2_state"],
             "temp_c": row["temp_c"],
