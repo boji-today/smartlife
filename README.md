@@ -75,6 +75,13 @@ mkdir -p data && cat schema.sql data.sql | sqlite3 data/smartlife.db
 .venv/bin/python collect.py
 ```
 
+`collect2.py` 是限时长连接探测。只读 `devices` 里唯一一台设备，保持 TCP，大约每 12 秒发心跳，把设备主动推送的 DPS 打到标准输出。不写 `readings`，不提供 HTTP。默认听 600 秒。与 `collect.py` 或容器不要同时连接同一台设备。断线重连、内存快照和落库尚未实现，见脚本顶部 TODO。
+
+```bash
+.venv/bin/python collect2.py
+.venv/bin/python collect2.py 600
+```
+
 单次读取当前二氧化碳：
 
 ```bash
