@@ -3,6 +3,7 @@ import os
 import sqlite3
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -13,6 +14,26 @@ import tinytuya
 ROOT = Path(__file__).resolve().parent
 DB = ROOT / "data" / "smartlife.db"
 LOG = ROOT / "collect.log"
+POOL = ThreadPoolExecutor(max_workers=2)
+READING_COLUMNS = (
+    ("switch", "INTEGER"),
+    ("pm25", "INTEGER"),
+    ("filter_pct", "INTEGER"),
+    ("air_quality", "TEXT"),
+    ("fault", "INTEGER"),
+)
+METRIC_COLUMNS = (
+    "co2_ppm",
+    "co2_state",
+    "temp_c",
+    "humidity",
+    "battery",
+    "switch",
+    "pm25",
+    "filter_pct",
+    "air_quality",
+    "fault",
+)
 
 
 def load_dotenv(path=ROOT / ".env"):
@@ -41,6 +62,86 @@ def connect():
     return conn
 
 
+def ensure_columns(conn):
+    for name, typ in READING_COLUMNS:
+        try:
+            conn.execute(f"ALTER TABLE readings ADD COLUMN {name} {typ}")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column" not in str(exc).lower():
+                raise
+    conn.commit()
+
+
+def metrics(category, dps):
+    if category == "co2bj":
+        return {
+            "co2_ppm": dps.get("2"),
+            "co2_state": dps.get("1"),
+            "temp_c": dps.get("18"),
+            "humidity": dps.get("19"),
+            "battery": dps.get("15"),
+        }
+    if category == "kj":
+        switch = dps.get("1")
+        return {
+            "switch": None if switch is None else int(bool(switch)),
+            "pm25": dps.get("2"),
+            "filter_pct": dps.get("5"),
+            "air_quality": dps.get("21"),
+            "fault": dps.get("22"),
+        }
+    return None
+
+
+def collect_one(row):
+    biz_id = row["biz_id"]
+    try:
+        result = read_status(biz_id, row["address"], row["version"], row["local_key"])
+        if result is None:
+            return
+        dps = result.get("dps")
+        if not dps:
+            log_error(f"{biz_id} no dps")
+            return
+        values = metrics(row["category"], dps)
+        if values is None:
+            log_error(f"{biz_id} unknown category {row['category']}")
+            return
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        columns = ", ".join(METRIC_COLUMNS)
+        placeholders = ", ".join("?" for _ in METRIC_COLUMNS)
+        conn = connect()
+        try:
+            ensure_columns(conn)
+            conn.execute(
+                f"""
+                INSERT INTO readings (
+                  device_id, source, biz_id, ts, {columns}, raw_json
+                ) VALUES (?, ?, ?, ?, {placeholders}, ?)
+                """,
+                (
+                    row["id"],
+                    row["source"],
+                    biz_id,
+                    ts,
+                    *[values.get(name) for name in METRIC_COLUMNS],
+                    json.dumps(result, ensure_ascii=False),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        if row["category"] == "kj":
+            print(
+                f"{ts} {biz_id} pm25={values.get('pm25')} air_quality={values.get('air_quality')}",
+                flush=True,
+            )
+        else:
+            print(f"{ts} {biz_id} co2_ppm={values.get('co2_ppm')}", flush=True)
+    except Exception as exc:
+        log_error(f"{biz_id} {exc}")
+
+
 def collect():
     if not DB.exists():
         log_error("smartlife.db not found")
@@ -51,58 +152,37 @@ def collect():
         log_error(f"collect {exc}")
         return
     try:
+        ensure_columns(conn)
         rows = conn.execute(
             """
-            SELECT id, biz_id, source, address, version, local_key
+            SELECT id, biz_id, source, address, version, local_key, category
             FROM devices
             """
         ).fetchall()
         if not rows:
             log_error("device not found")
             return
+        pending = []
         for row in rows:
             source = row["source"]
-            biz_id = row["biz_id"]
             if source == "ha":
                 # TODO: 用 biz_id 只读拉取 HA 状态并写入 readings。禁止服务调用。
                 continue
             if source != "tuya":
                 log_error(f"unknown source {source}")
                 continue
-            result = read_status(biz_id, row["address"], row["version"], row["local_key"])
-            if result is None:
-                continue
-            dps = result.get("dps")
-            if not dps:
-                log_error(f"{biz_id} no dps")
-                continue
-            ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            conn.execute(
-                """
-                INSERT INTO readings (
-                  device_id, source, biz_id, ts,
-                  co2_ppm, co2_state, temp_c, humidity, battery, raw_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    row["id"],
-                    source,
-                    biz_id,
-                    ts,
-                    dps.get("2"),
-                    dps.get("1"),
-                    dps.get("18"),
-                    dps.get("19"),
-                    dps.get("15"),
-                    json.dumps(result, ensure_ascii=False),
-                ),
-            )
-            conn.commit()
-            print(f"{ts} {biz_id} co2_ppm={dps.get('2')}", flush=True)
+            pending.append(dict(row))
     except Exception as exc:
         log_error(f"collect {exc}")
+        return
     finally:
         conn.close()
+    futures = [POOL.submit(collect_one, row) for row in pending]
+    for future in futures:
+        try:
+            future.result()
+        except Exception as exc:
+            log_error(f"collect {exc}")
 
 
 def read_status(dev_id, address, version, local_key):
@@ -222,8 +302,10 @@ def query_readings(qs):
         log_error(f"readings {exc}")
         return 503, {"error": "database"}
     try:
+        ensure_columns(conn)
         sql = """
-            SELECT d.name, r.source, r.ts, r.co2_ppm, r.co2_state, r.temp_c, r.humidity, r.battery
+            SELECT d.name, r.source, r.ts, r.co2_ppm, r.co2_state, r.temp_c, r.humidity, r.battery,
+                   r.switch, r.pm25, r.filter_pct, r.air_quality, r.fault
             FROM readings r
             JOIN devices d ON d.id = r.device_id
             WHERE r.ts >= ? AND r.ts <= ?
@@ -252,6 +334,11 @@ def query_readings(qs):
             "temp_c": row["temp_c"],
             "humidity": row["humidity"],
             "battery": row["battery"],
+            "switch": row["switch"],
+            "pm25": row["pm25"],
+            "filter_pct": row["filter_pct"],
+            "air_quality": row["air_quality"],
+            "fault": row["fault"],
         }
         for row in rows
     ]

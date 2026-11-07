@@ -33,12 +33,17 @@ def load_device():
     conn = sqlite3.connect(uri, uri=True)
     try:
         rows = conn.execute(
-            "SELECT biz_id, address, version, local_key FROM devices WHERE source = 'tuya'"
+            """
+            SELECT biz_id, address, version, local_key
+            FROM devices
+            WHERE source = 'tuya'
+            LIMIT 1
+            """
         ).fetchall()
     finally:
         conn.close()
-    if len(rows) != 1:
-        raise SystemExit(f"expected 1 device, got {len(rows)}")
+    if not rows:
+        raise SystemExit("device not found")
     return rows[0]
 
 
