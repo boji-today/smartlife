@@ -16,6 +16,7 @@ HA_WS = (
 HA_CLASS_COLUMNS = {
     "temperature": "temp_c",
     "humidity": "humidity",
+    "battery": "battery",
 }
 
 
@@ -106,37 +107,38 @@ def ha_snapshot(url, token):
 
 
 def store_ha_reading(row, entity_ids, state_by_id, ts):
+    if not entity_ids:
+        return
     biz_id = row["biz_id"]
     grouped = {kind: [] for kind in HA_CLASS_COLUMNS}
+    raw = []
     for entity_id in entity_ids:
         state = state_by_id.get(entity_id)
         if not isinstance(state, dict):
             continue
+        raw.append(state)
         kind = (state.get("attributes") or {}).get("device_class")
         if kind in grouped:
             grouped[kind].append(state)
     chosen = {}
-    raw = []
     for kind, column in HA_CLASS_COLUMNS.items():
         states = grouped[kind]
-        if kind == "humidity" and not states:
-            continue
         if len(states) != 1:
-            raise RuntimeError(f"{kind} count {len(states)}")
+            if states:
+                log_error(f"{biz_id} {kind} count {len(states)}")
+            continue
         try:
             number = ha_number(states[0].get("state"))
         except ValueError:
             number = None
         if number is None:
-            raise RuntimeError(f"{kind} not numeric")
+            log_error(f"{biz_id} {kind} not numeric")
+            continue
         chosen[column] = number
-        raw.append(states[0])
-    if "temp_c" not in chosen:
-        return
     insert_reading(row, ts, chosen, raw)
-    humidity = chosen.get("humidity")
-    suffix = "" if humidity is None else f" humidity={humidity}"
-    print(f"{ts} {biz_id} temp_c={chosen['temp_c']}{suffix}", flush=True)
+    parts = [f"{column}={chosen[column]}" for column in ("temp_c", "humidity", "battery") if column in chosen]
+    if parts:
+        print(f"{ts} {biz_id} {' '.join(parts)}", flush=True)
 
 
 def collect_ha(rows):
