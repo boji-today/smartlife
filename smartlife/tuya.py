@@ -37,14 +37,10 @@ def read_status(dev_id, address, version, local_key):
     device.set_socketTimeout(5)
     try:
         result = device.status()
-    except Exception as exc:
-        log_error(f"{dev_id} {exc}")
-        return None
     finally:
         device.close()
     if not isinstance(result, dict) or result.get("Error") or result.get("Err"):
-        log_error(f"{dev_id} {result}")
-        return None
+        raise RuntimeError(result)
     return result
 
 
@@ -52,16 +48,12 @@ def collect_one(row):
     biz_id = row["biz_id"]
     try:
         result = read_status(biz_id, row["address"], row["version"], row["local_key"])
-        if result is None:
-            return
         dps = result.get("dps")
         if not dps:
-            log_error(f"{biz_id} no dps")
-            return
+            raise RuntimeError("no dps")
         values = metrics(row["category"], dps)
         if values is None:
-            log_error(f"{biz_id} unknown category {row['category']}")
-            return
+            raise RuntimeError(f"unknown category {row['category']}")
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         insert_reading(row, ts, values, result)
         if row["category"] == "kj":

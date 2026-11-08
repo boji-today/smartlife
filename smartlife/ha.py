@@ -117,15 +117,13 @@ def store_ha_reading(row, entity_ids, state_by_id, ts):
         if kind == "humidity" and not states:
             continue
         if len(states) != 1:
-            log_error(f"{biz_id} {kind} count {len(states)}")
-            return
+            raise RuntimeError(f"{kind} count {len(states)}")
         try:
             number = ha_number(states[0].get("state"))
         except ValueError:
             number = None
         if number is None:
-            log_error(f"{biz_id} {kind} not numeric")
-            return
+            raise RuntimeError(f"{kind} not numeric")
         chosen[column] = number
         raw.append(states[0])
     if "temp_c" not in chosen:
