@@ -1,13 +1,13 @@
 import json
 import os
-import socket
-import ssl
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
+import websocket
+
 from smartlife.db import insert_reading
 from smartlife.log import log_error
-from smartlife.ws import _ws_handshake, _ws_json, _ws_send, split_page
+from smartlife.ws import split_page
 
 HA_WS = (
     "config/entity_registry/list",
@@ -36,23 +36,22 @@ def ha_number(value):
     return number
 
 
-def ha_commands(sock, host, port, token):
-    pending = _ws_handshake(sock, host, port)
-    hello = _ws_json(sock, pending)
+def ha_commands(ws, token):
+    hello = json.loads(ws.recv())
     if hello.get("type") != "auth_required":
         raise ConnectionError("unexpected websocket hello")
-    _ws_send(sock, 0x1, json.dumps({"type": "auth", "access_token": token}).encode())
-    auth = _ws_json(sock, pending)
+    ws.send(json.dumps({"type": "auth", "access_token": token}))
+    auth = json.loads(ws.recv())
     if auth.get("type") != "auth_ok":
         raise ConnectionError("websocket auth failed")
     jobs = []
     for idx, command in enumerate(HA_WS, start=1):
         jobs.append({"id": idx, "command": command, "items": [], "done": False})
-        _ws_send(sock, 0x1, json.dumps({"id": idx, "type": command}).encode())
+        ws.send(json.dumps({"id": idx, "type": command}))
     by_id = {job["id"]: job for job in jobs}
     next_id = len(jobs) + 1
     while any(not job["done"] for job in jobs):
-        msg = _ws_json(sock, pending)
+        msg = json.loads(ws.recv())
         job = by_id.get(msg.get("id"))
         if job is None:
             continue
@@ -67,7 +66,7 @@ def ha_commands(sock, host, port, token):
         follow = {"id": next_id, "type": job["command"], "page": cursor}
         by_id[next_id] = job
         next_id += 1
-        _ws_send(sock, 0x1, json.dumps(follow).encode())
+        ws.send(json.dumps(follow))
     return jobs[0]["items"], jobs[1]["items"]
 
 
@@ -75,19 +74,25 @@ def ha_query(url, token):
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise ConnectionError("bad HA_URL")
-    host = parsed.hostname
+    scheme = "wss" if parsed.scheme == "https" else "ws"
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
-    raw = socket.create_connection((host, port), timeout=60)
-    raw.settimeout(60)
-    sock = raw
-    if parsed.scheme == "https":
-        sock = ssl.create_default_context().wrap_socket(raw, server_hostname=host)
+    host = parsed.hostname
+    if ":" in host:
+        host = f"[{host}]"
+    ws_url = f"{scheme}://{host}:{port}/api/websocket"
+    # 1.9.2 只有带上 http_proxy_host 才会留下 http_no_proxy，* 使该地址不会被使用
+    ws = websocket.create_connection(
+        ws_url,
+        timeout=60,
+        suppress_origin=True,
+        http_proxy_host="127.0.0.1",
+        http_proxy_port=9,
+        http_no_proxy=["*"],
+    )
     try:
-        return ha_commands(sock, host, port, token)
+        return ha_commands(ws, token)
     finally:
-        sock.close()
-        if sock is not raw:
-            raw.close()
+        ws.close()
 
 
 def ha_snapshot(url, token):
