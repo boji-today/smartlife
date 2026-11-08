@@ -353,6 +353,8 @@ def store_ha_reading(row, entity_ids, state_by_id, ts):
     raw = []
     for kind, column in HA_CLASS_COLUMNS.items():
         states = grouped[kind]
+        if kind == "humidity" and not states:
+            continue
         if len(states) != 1:
             log_error(f"{biz_id} {kind} count {len(states)}")
             return
@@ -365,6 +367,8 @@ def store_ha_reading(row, entity_ids, state_by_id, ts):
             return
         chosen[column] = number
         raw.append(states[0])
+    if "temp_c" not in chosen:
+        return
     columns = ", ".join(METRIC_COLUMNS)
     placeholders = ", ".join("?" for _ in METRIC_COLUMNS)
     conn = connect()
@@ -388,10 +392,9 @@ def store_ha_reading(row, entity_ids, state_by_id, ts):
         conn.commit()
     finally:
         conn.close()
-    print(
-        f"{ts} {biz_id} temp_c={chosen['temp_c']} humidity={chosen['humidity']}",
-        flush=True,
-    )
+    humidity = chosen.get("humidity")
+    suffix = "" if humidity is None else f" humidity={humidity}"
+    print(f"{ts} {biz_id} temp_c={chosen['temp_c']}{suffix}", flush=True)
 
 
 def collect_ha(rows):
