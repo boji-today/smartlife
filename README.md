@@ -69,7 +69,7 @@ Honeywell H Max，品类 `kj`，协议 `3.4`，`source=tuya`。地址、`biz_id`
 
 本地 DPS `4`、`101`、`102`、`103`、`104`、`105` 不在云端规范里，只留在 `raw_json`。
 
-餐厅米家智能温湿度计3 mini 已在 `devices`（`source=ha`）。采集尚未实现。
+餐厅米家智能温湿度计3 mini 已在 `devices`（`source=ha`）。它与涂鸦在同一 cron 写入温度和湿度。
 
 ## 数据库
 
@@ -85,7 +85,13 @@ mkdir -p data && cat schema.sql data.sql | sqlite3 data/smartlife.db
 
 ## 采集
 
-`collect.py` 是常驻进程，按 `COLLECT_CRON` 对齐到整分钟。`source=tuya` 的行用 `biz_id` 走本地协议，写入 `readings` 时带上 `devices.id`、`source`、`biz_id`。`co2bj` 写二氧化碳列，`kj` 写 H Max 列。进程内固定 2 个线程，多出的设备排队；每台单独连接，一台失败只记 `collect.log`，不影响另一台。`source=ha` 尚未采集。失败、库不存在或没有设备时只追加 `collect.log`，不插入读数。醒来时若已错过该整点，记 `missed`，不补写。
+`collect.py` 是常驻进程，按 `COLLECT_CRON` 对齐到整分钟。读完 `devices` 后同时启动涂鸦和 HA，主流程等两边结束。任一路异常只记自己的 `collect.log`，不取消另一路。
+
+`source=tuya` 仍用 `collect_one()`，不加重试。`biz_id` 走本地协议。`co2bj` 写二氧化碳列，`kj` 写 H Max 列。写入时带上 `devices.id`、`source`、`biz_id`。进程内固定 2 个线程，多出的设备排队；每台单独连接，一台失败不影响另一台。
+
+`source=ha` 在单独线程里采集，不占用这 2 个线程，也不调用 `GET /api/states`。一条 WebSocket 连续发送 `config/entity_registry/list` 和 `get_states`。连接失败或任一命令失败，整段会话重试一次。在内存中用 `entity_id` 对齐，只保留 registry 的 `device_id` 等于该行 `biz_id`、且域名为 `sensor` 的实体。`attributes.device_class` 的 `temperature`、`humidity` 写入 `temp_c`、`humidity`，数值按返回保存，整数保持整数。同一类多于一个、缺少任一类或不是数字时记日志，只跳过这台。插入 `devices.id`、`source`、`biz_id`、`ts`、`temp_c`、`humidity`，`raw_json` 只含这两条 state。
+
+失败、库不存在或没有设备时只追加 `collect.log`，不插入读数。醒来时若已错过该整点，记 `missed`，不补写。
 
 ```bash
 .venv/bin/python collect.py
@@ -127,7 +133,7 @@ Grafana 与容器同在 `grafana` 网络时，Infinity 使用类型 JSON、Parse
 http://smartlife:8080/readings?from=${__from}&to=${__to}&name=米家智能温湿度计3 mini&source=ha
 ```
 
-`source=ha` 尚未采集，这条目前为空。已有数据：
+已有数据：
 
 ```text
 http://smartlife:8080/readings?from=${__from}&to=${__to}&name=二氧化碳检测仪&source=tuya

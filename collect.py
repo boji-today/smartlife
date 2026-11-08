@@ -1,6 +1,10 @@
+import base64
 import json
 import os
+import socket
 import sqlite3
+import ssl
+import struct
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -34,6 +38,14 @@ METRIC_COLUMNS = (
     "air_quality",
     "fault",
 )
+HA_WS = (
+    "config/entity_registry/list",
+    "get_states",
+)
+HA_CLASS_COLUMNS = {
+    "temperature": "temp_c",
+    "humidity": "humidity",
+}
 
 
 def load_dotenv(path=ROOT / ".env"):
@@ -142,6 +154,278 @@ def collect_one(row):
         log_error(f"{biz_id} {exc}")
 
 
+def ha_number(value):
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+    else:
+        text = str(value).strip()
+        if not text or text in {"unavailable", "unknown", "none", "None"}:
+            return None
+        number = float(text)
+    if number != number or number in {float("inf"), float("-inf")}:
+        return None
+    if number.is_integer():
+        return int(number)
+    return number
+
+
+def split_page(result):
+    if isinstance(result, list):
+        return result, None
+    if isinstance(result, dict):
+        chunk = None
+        for key in ("items", "entities", "states"):
+            if isinstance(result.get(key), list):
+                chunk = result[key]
+                break
+        if chunk is None:
+            raise ConnectionError("unexpected ha page")
+        cursor = result.get("next") or result.get("next_page") or result.get("cursor")
+        if cursor in ("", None, 0, False):
+            return chunk, None
+        return chunk, cursor
+    raise ConnectionError("unexpected ha result")
+
+
+def _ws_send(sock, opcode, payload):
+    mask = os.urandom(4)
+    n = len(payload)
+    header = bytearray([0x80 | opcode])
+    if n < 126:
+        header.append(0x80 | n)
+    elif n < 65536:
+        header.append(0x80 | 126)
+        header.extend(struct.pack("!H", n))
+    else:
+        header.append(0x80 | 127)
+        header.extend(struct.pack("!Q", n))
+    masked = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+    sock.sendall(bytes(header) + mask + masked)
+
+
+def _ws_handshake(sock, host, port):
+    key = base64.b64encode(os.urandom(16)).decode()
+    sock.sendall(
+        (
+            "GET /api/websocket HTTP/1.1\r\n"
+            f"Host: {host}:{port}\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\n"
+            "Sec-WebSocket-Version: 13\r\n"
+            "\r\n"
+        ).encode()
+    )
+    buf = bytearray()
+    while b"\r\n\r\n" not in buf:
+        chunk = sock.recv(4096)
+        if not chunk:
+            raise ConnectionError("websocket handshake closed")
+        buf.extend(chunk)
+    head, _, rest = bytes(buf).partition(b"\r\n\r\n")
+    status = head.decode().split("\r\n", 1)[0]
+    if " 101 " not in status:
+        raise ConnectionError("websocket upgrade failed")
+    return bytearray(rest)
+
+
+def _ws_recv(sock, pending):
+    def recv_exact(n):
+        while len(pending) < n:
+            chunk = sock.recv(max(4096, n - len(pending)))
+            if not chunk:
+                raise ConnectionError("websocket closed")
+            pending.extend(chunk)
+        out = bytes(pending[:n])
+        del pending[:n]
+        return out
+
+    parts = []
+    while True:
+        b0, b1 = recv_exact(2)
+        fin = b0 & 0x80
+        op = b0 & 0x0F
+        length = b1 & 0x7F
+        if b1 & 0x80:
+            raise ConnectionError("server frame is masked")
+        if length == 126:
+            length = struct.unpack("!H", recv_exact(2))[0]
+        elif length == 127:
+            length = struct.unpack("!Q", recv_exact(8))[0]
+        data = recv_exact(length) if length else b""
+        if op == 0x8:
+            return None
+        if op == 0x9:
+            _ws_send(sock, 0xA, data)
+            continue
+        if op == 0xA:
+            continue
+        if op in (0x1, 0x0):
+            parts.append(data)
+        if fin and parts:
+            return b"".join(parts).decode()
+
+
+def _ws_json(sock, pending):
+    raw = _ws_recv(sock, pending)
+    if raw is None:
+        raise ConnectionError("websocket closed")
+    return json.loads(raw)
+
+
+def ha_commands(sock, host, port, token):
+    pending = _ws_handshake(sock, host, port)
+    hello = _ws_json(sock, pending)
+    if hello.get("type") != "auth_required":
+        raise ConnectionError("unexpected websocket hello")
+    _ws_send(sock, 0x1, json.dumps({"type": "auth", "access_token": token}).encode())
+    auth = _ws_json(sock, pending)
+    if auth.get("type") != "auth_ok":
+        raise ConnectionError("websocket auth failed")
+    jobs = []
+    for idx, command in enumerate(HA_WS, start=1):
+        jobs.append({"id": idx, "command": command, "items": [], "done": False})
+        _ws_send(sock, 0x1, json.dumps({"id": idx, "type": command}).encode())
+    by_id = {job["id"]: job for job in jobs}
+    next_id = len(jobs) + 1
+    while any(not job["done"] for job in jobs):
+        msg = _ws_json(sock, pending)
+        job = by_id.get(msg.get("id"))
+        if job is None:
+            continue
+        if not msg.get("success", False):
+            err = msg.get("error") or {}
+            raise ConnectionError(err.get("message") or job["command"])
+        chunk, cursor = split_page(msg.get("result"))
+        job["items"].extend(chunk)
+        if not cursor:
+            job["done"] = True
+            continue
+        follow = {"id": next_id, "type": job["command"], "page": cursor}
+        by_id[next_id] = job
+        next_id += 1
+        _ws_send(sock, 0x1, json.dumps(follow).encode())
+    return jobs[0]["items"], jobs[1]["items"]
+
+
+def ha_query(url, token):
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ConnectionError("bad HA_URL")
+    host = parsed.hostname
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    raw = socket.create_connection((host, port), timeout=60)
+    raw.settimeout(60)
+    sock = raw
+    if parsed.scheme == "https":
+        sock = ssl.create_default_context().wrap_socket(raw, server_hostname=host)
+    try:
+        return ha_commands(sock, host, port, token)
+    finally:
+        sock.close()
+        if sock is not raw:
+            raw.close()
+
+
+def ha_snapshot(url, token):
+    error = None
+    for _ in range(2):
+        try:
+            return ha_query(url, token)
+        except Exception as exc:
+            error = exc
+    raise error
+
+
+def store_ha_reading(row, entity_ids, state_by_id, ts):
+    biz_id = row["biz_id"]
+    grouped = {kind: [] for kind in HA_CLASS_COLUMNS}
+    for entity_id in entity_ids:
+        state = state_by_id.get(entity_id)
+        if not isinstance(state, dict):
+            continue
+        kind = (state.get("attributes") or {}).get("device_class")
+        if kind in grouped:
+            grouped[kind].append(state)
+    chosen = {}
+    raw = []
+    for kind, column in HA_CLASS_COLUMNS.items():
+        states = grouped[kind]
+        if len(states) != 1:
+            log_error(f"{biz_id} {kind} count {len(states)}")
+            return
+        try:
+            number = ha_number(states[0].get("state"))
+        except ValueError:
+            number = None
+        if number is None:
+            log_error(f"{biz_id} {kind} not numeric")
+            return
+        chosen[column] = number
+        raw.append(states[0])
+    columns = ", ".join(METRIC_COLUMNS)
+    placeholders = ", ".join("?" for _ in METRIC_COLUMNS)
+    conn = connect()
+    try:
+        ensure_columns(conn)
+        conn.execute(
+            f"""
+            INSERT INTO readings (
+              device_id, source, biz_id, ts, {columns}, raw_json
+            ) VALUES (?, ?, ?, ?, {placeholders}, ?)
+            """,
+            (
+                row["id"],
+                row["source"],
+                biz_id,
+                ts,
+                *[chosen.get(name) for name in METRIC_COLUMNS],
+                json.dumps(raw, ensure_ascii=False),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    print(
+        f"{ts} {biz_id} temp_c={chosen['temp_c']} humidity={chosen['humidity']}",
+        flush=True,
+    )
+
+
+def collect_ha(rows):
+    try:
+        url = os.environ.get("HA_URL", "").rstrip("/")
+        token = os.environ.get("HA_TOKEN", "")
+        if not url or not token:
+            log_error("HA_URL or HA_TOKEN missing")
+            return
+        entities, states = ha_snapshot(url, token)
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        state_by_id = {
+            item.get("entity_id"): item
+            for item in states
+            if isinstance(item, dict) and item.get("entity_id")
+        }
+        sensors = {}
+        for entry in entities:
+            if not isinstance(entry, dict):
+                continue
+            entity_id = entry.get("entity_id") or ""
+            device_id = entry.get("device_id")
+            if not device_id or not entity_id.startswith("sensor."):
+                continue
+            sensors.setdefault(device_id, []).append(entity_id)
+        for row in rows:
+            try:
+                store_ha_reading(row, sensors.get(row["biz_id"], []), state_by_id, ts)
+            except Exception as exc:
+                log_error(f"{row['biz_id']} {exc}")
+    except Exception as exc:
+        log_error(f"ha {exc}")
+
+
 def collect():
     if not DB.exists():
         log_error("smartlife.db not found")
@@ -162,27 +446,33 @@ def collect():
         if not rows:
             log_error("device not found")
             return
-        pending = []
+        tuya_rows = []
+        ha_rows = []
         for row in rows:
             source = row["source"]
             if source == "ha":
-                # TODO: 用 biz_id 只读拉取 HA 状态并写入 readings。禁止服务调用。
-                continue
-            if source != "tuya":
+                ha_rows.append(dict(row))
+            elif source == "tuya":
+                tuya_rows.append(dict(row))
+            else:
                 log_error(f"unknown source {source}")
-                continue
-            pending.append(dict(row))
     except Exception as exc:
         log_error(f"collect {exc}")
         return
     finally:
         conn.close()
-    futures = [POOL.submit(collect_one, row) for row in pending]
+    ha_thread = None
+    if ha_rows:
+        ha_thread = threading.Thread(target=collect_ha, args=(ha_rows,), name="ha")
+        ha_thread.start()
+    futures = [POOL.submit(collect_one, row) for row in tuya_rows]
     for future in futures:
         try:
             future.result()
         except Exception as exc:
             log_error(f"collect {exc}")
+    if ha_thread is not None:
+        ha_thread.join()
 
 
 def read_status(dev_id, address, version, local_key):
