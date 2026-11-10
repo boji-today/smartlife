@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS devices (
   mac TEXT,
   local_key TEXT,
   updated_at TEXT NOT NULL,
+  ha_domains TEXT, -- source=ha 的 domain 白名单；NULL 为 sensor、humidifier、climate
   UNIQUE (source, biz_id)
 );
 

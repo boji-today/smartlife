@@ -69,7 +69,7 @@ Honeywell H Max，品类 `kj`，协议 `3.4`，`source=tuya`。地址、`biz_id`
 
 本地 DPS `4`、`101`、`102`、`103`、`104`、`105` 不在云端规范里，只留在 `raw_json`。
 
-四台 `source=ha` 设备与涂鸦在同一 cron 采集：餐厅米家智能温湿度计3 mini、主卧室温湿度计写入温度、湿度和电量；餐厅米家智能除湿机 50L 只写入温度，湿度和电量为空；餐厅小米智能门铃3 只写入电量，温度和湿度为空。
+四台 `source=ha` 设备与涂鸦在同一 cron 采集：餐厅米家智能温湿度计3 mini、主卧室温湿度计写入温度、湿度和电量；餐厅米家智能除湿机 50L 写入温度和当前湿度，电量为空；餐厅小米智能门铃3 只写入电量，温度和湿度为空。
 
 ## 数据库
 
@@ -79,9 +79,9 @@ Honeywell H Max，品类 `kj`，协议 `3.4`，`source=tuya`。地址、`biz_id`
 mkdir -p data && cat schema.sql data.sql | sqlite3 data/smartlife.db
 ```
 
-`devices`：自增 `id`。`source` 与 `biz_id` 组成唯一键。`biz_name` 是原名称，`name` 供 Infinity 过滤。`source` 为 `tuya` 或 `ha`。`address`、`version`、`local_key` 可空。
+`devices`：自增 `id`。`source` 与 `biz_id` 组成唯一键。`biz_name` 是原名称，`name` 供 Infinity 过滤。`source` 为 `tuya` 或 `ha`。`address`、`version`、`local_key` 可空。`ha_domains` 只给 `source=ha`：空为 `sensor`、`humidifier`、`climate`，JSON 数组是白名单，`[]` 不采集。
 
-`readings`：`device_id` 是 `devices.id`，并冗余 `source`、`biz_id`。其余为 `ts`（UTC）、`co2_ppm`、`co2_state`、`temp_c`、`humidity`、`battery`、`switch`、`pm25`、`filter_pct`、`air_quality`、`fault`、`raw_json`。另一台设备的列为空。已有库在采集或查询时补列。
+`readings`：`device_id` 是 `devices.id`，并冗余 `source`、`biz_id`。其余为 `ts`（UTC）、`co2_ppm`、`co2_state`、`temp_c`、`humidity`、`battery`、`switch`、`pm25`、`filter_pct`、`air_quality`、`fault`、`raw_json`。另一台设备的列为空。已有库在采集或查询时补 `readings` 列和 `devices.ha_domains`。
 
 ## 采集
 
@@ -89,7 +89,7 @@ mkdir -p data && cat schema.sql data.sql | sqlite3 data/smartlife.db
 
 `source=tuya` 仍用 `collect_one()`，不加重试。`biz_id` 走本地协议。`co2bj` 写二氧化碳列，`kj` 写 H Max 列。写入时带上 `devices.id`、`source`、`biz_id`。进程内固定 2 个线程，多出的设备排队；每台单独连接，一台失败不影响另一台。
 
-`source=ha` 在单独线程里采集，不占用这 2 个线程，也不调用 `GET /api/states`。一条 WebSocket 连续发送 `config/entity_registry/list` 和 `get_states`。连接失败或任一命令失败，整段会话重试一次。在内存中用 `entity_id` 对齐，只保留 registry 的 `device_id` 等于该行 `biz_id`、且域名为 `sensor` 的实体。本轮一条 sensor 都没有则不插入。至少一条时插入一行。`device_class` 为 `temperature`、`humidity`、`battery` 时，恰好一个且是数字才写入 `temp_c`、`humidity`、`battery`，否则该列为 null。同一类多于一个或不是数字时记日志，仍然插入。缺的列不记错误。不读 `humidifier`，`event` 不采集。数值按返回保存，整数保持整数。插入 `devices.id`、`source`、`biz_id`、`ts` 和上述三列，其余指标列为 null。`raw_json` 含该设备本轮全部 sensor 的 state。
+`source=ha` 在单独线程里采集，不占用这 2 个线程，也不调用 `GET /api/states`。一条 WebSocket 连续发送 `config/device_registry/list`、`config/entity_registry/list` 和 `get_states`。连接失败或任一命令失败，整段会话重试一次，仍失败则不插入。归属只认 registry 的 `device_id`。`device_id` 不在 device registry、没有允许的实体、`ha_domains` 为 `[]` 或不是 JSON 数组时不插入。允许的实体至少一个就插入。`sensor` 的 `device_class` 为 `temperature`、`humidity`、`battery`、`carbon_dioxide`、`pm25` 时写入 `temp_c`、`humidity`、`battery`、`co2_ppm`、`pm25`。`humidifier` 的 `current_humidity` 写入 `humidity`，`climate` 的 `current_temperature` 写入 `temp_c`。sensor 优先于属性；高优先级没有可用数字才用下一级。同一优先级多个可用值则该列为空并记日志。`unknown`、`unavailable`、空、布尔和单位不符不写成数字。一个数值都没有时列为空，`raw_json` 仍是这些实体的 state。其他域不进数值列；写进 `ha_domains` 时只进入 `raw_json`。`event` 不进数值列。数值按返回保存，整数保持整数。其余指标列为 null。
 
 失败、库不存在或没有设备时只追加 `collect.log`，不插入读数。醒来时若已错过该整点，记 `missed`，不补写。
 

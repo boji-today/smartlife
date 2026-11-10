@@ -10,6 +10,7 @@ READING_COLUMNS = (
     ("air_quality", "TEXT"),
     ("fault", "INTEGER"),
 )
+DEVICE_COLUMNS = (("ha_domains", "TEXT"),)
 METRIC_COLUMNS = (
     "co2_ppm",
     "co2_state",
@@ -31,13 +32,19 @@ def connect():
     return conn
 
 
+def ensure_column(conn, table, name, typ):
+    try:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {typ}")
+    except sqlite3.OperationalError as exc:
+        if "duplicate column" not in str(exc).lower():
+            raise
+
+
 def ensure_columns(conn):
     for name, typ in READING_COLUMNS:
-        try:
-            conn.execute(f"ALTER TABLE readings ADD COLUMN {name} {typ}")
-        except sqlite3.OperationalError as exc:
-            if "duplicate column" not in str(exc).lower():
-                raise
+        ensure_column(conn, "readings", name, typ)
+    for name, typ in DEVICE_COLUMNS:
+        ensure_column(conn, "devices", name, typ)
     conn.commit()
 
 

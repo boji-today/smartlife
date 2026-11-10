@@ -23,7 +23,7 @@ def collect():
         ensure_columns(conn)
         rows = conn.execute(
             """
-            SELECT id, biz_id, source, address, version, local_key, category
+            SELECT id, biz_id, source, address, version, local_key, category, ha_domains
             FROM devices
             """
         ).fetchall()
