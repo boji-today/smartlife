@@ -16,3 +16,4 @@ smartlife.db-*
 collect.log
 
 .DS_Store
+handoff/

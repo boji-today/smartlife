@@ -5,7 +5,9 @@ from urllib.parse import urlparse
 
 import websocket
 
-from smartlife.db import insert_reading
+from smartlife.activity_intervals import rebuild_occupied
+from smartlife.activity_sync import fetch_history, sync_one
+from smartlife.db import connect, ensure_columns, insert_reading
 from smartlife.log import log_error
 from smartlife.ws import split_page
 
@@ -375,6 +377,38 @@ def ha_snapshot(url, token):
     raise error
 
 
+def collect_activity(rows, entries, url, token, now=None):
+    if now is None:
+        now = datetime.now(timezone.utc)
+    if not isinstance(entries, list):
+        log_error("ha activity registry missing")
+        return
+    conn = connect()
+    try:
+        ensure_columns(conn)
+        for row in rows:
+            biz_id = row.get("biz_id", "")
+            try:
+                status = sync_one(
+                    conn,
+                    row,
+                    entries,
+                    now,
+                    lambda entity_id, start, end: fetch_history(url, token, entity_id, start, end),
+                )
+            except Exception as exc:
+                log_error(f"ha activity {biz_id} {exc}")
+                continue
+            if status != "ok":
+                continue
+            try:
+                rebuild_occupied(conn, row["id"])
+            except Exception as exc:
+                log_error(f"ha activity intervals {biz_id} {exc}")
+    finally:
+        conn.close()
+
+
 def collect_ha(rows):
     try:
         url = os.environ.get("HA_URL", "").rstrip("/")
@@ -385,7 +419,11 @@ def collect_ha(rows):
         found = ha_snapshot(url, token)
         if any(name not in found for name in HA_WS):
             raise ConnectionError("incomplete ha snapshot")
-        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except Exception as exc:
+        log_error(f"ha {exc}")
+        return
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
         collect_snapshot(
             rows,
             found["config/device_registry/list"],
@@ -393,5 +431,9 @@ def collect_ha(rows):
             found["get_states"],
             ts,
         )
+    except Exception as exc:
+        log_error(f"ha {exc}")
+    try:
+        collect_activity(rows, found["config/entity_registry/list"], url, token)
     except Exception as exc:
         log_error(f"ha {exc}")

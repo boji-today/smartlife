@@ -93,6 +93,10 @@ mkdir -p data && cat schema.sql data.sql | sqlite3 data/smartlife.db
 
 失败、库不存在或没有设备时只追加 `collect.log`，不插入读数。醒来时若已错过该整点，记 `missed`，不补写。
 
+`ha_event_selectors` 与 `ha_domains` 分开。前者是 JSON 数组，默认 `[]`，元素是 Entity Registry 里 `unique_id` 的后缀；空数组不采集事件历史。数值采集仍只看 `ha_domains`。事件采集只把 History 原样写入 `activity_events`，不解析 `state`，也不带事件类型参数。`activity_synced_until` 只表示原始 History 已持久化到这个 `last_updated` 上界。
+
+人在传感器 `category=pir1`。厕所、厨房各一行，`ha_domains` 为 `["sensor"]`，`ha_event_selectors` 为 `["motion_detected_e_2_1008"]`。电量仍进 `readings.battery`。有人区间在 `activity_intervals`，`kind` 只有 `occupied`：间隔小于 600 秒的有人事件合成一段，`start_time` 是第一条事件时间，`end_time` 在落库时写成最后一条加 600 秒。600 秒只在这个 occupied 计算里使用。查询不再加时间。空白不是无人。原始事件只在库里查，没有事件 API。
+
 ```bash
 .venv/bin/python collect.py
 ```
@@ -124,8 +128,11 @@ docker compose -f compose.yml up -d --build
 
 - `GET /health`
 - `GET /readings?from=${__from}&to=${__to}`，可加 `name`、`source`
+- `GET /activity_intervals?from=${__from}&to=${__to}`，可加 `name`
 
-`from` / `to` 为 Unix 毫秒或 UTC ISO8601（`Z` 或 `+00:00`），缺省最近 24 小时。`name` 对应 `devices.name`，`source` 对应 `readings.source`，缺省不过滤。响应按 `ts` 升序，含 `name`、`source`、`co2_ppm`、`co2_state`、`temp_c`、`humidity`、`battery`、`switch`、`pm25`、`filter_pct`、`air_quality`、`fault`。不含 `device_id`、`biz_id`、local key 与 `raw_json`。
+`/readings` 的 `from` / `to` 为 Unix 毫秒或 UTC ISO8601（`Z` 或 `+00:00`），缺省最近 24 小时，比较前截断到整秒。`name` 对应 `devices.name`，`source` 对应 `readings.source`，缺省不过滤。响应按 `ts` 升序，含 `name`、`source`、`co2_ppm`、`co2_state`、`temp_c`、`humidity`、`battery`、`switch`、`pm25`、`filter_pct`、`air_quality`、`fault`。不含 `device_id`、`biz_id`、local key 与 `raw_json`。
+
+`/activity_intervals` 的 `from` / `to` 同样接受 Unix 毫秒或 UTC ISO8601，但保留亚秒，不走 `/readings` 的截断。缺省最近 24 小时。只返回表内 `kind=occupied` 的行，字段是 `name`、`kind`、`start_time`、`end_time`。相交条件是 `start_time < to AND end_time > from`，不再加 600 秒，也不按同步检查点截断。
 
 Grafana 与容器同在 `grafana` 网络时，Infinity 使用类型 JSON、Parser Backend、Format Time series。URL：
 

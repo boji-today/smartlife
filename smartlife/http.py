@@ -6,7 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote, urlparse
 
 from smartlife import paths
-from smartlife.db import connect, ensure_columns
+from smartlife.db import connect, ensure_columns, parse_utc, utc_text
 from smartlife.log import log_error
 
 
@@ -98,6 +98,60 @@ def query_readings(qs):
     ]
 
 
+def parse_activity_bound(value, default):
+    if value is None or value == "":
+        return utc_text(default)
+    if value.isdigit():
+        return utc_text(datetime.fromtimestamp(int(value) / 1000, timezone.utc))
+    return utc_text(parse_utc(value))
+
+
+def query_activity_intervals(qs):
+    now = datetime.now(timezone.utc)
+    try:
+        start = parse_activity_bound((qs.get("from") or [None])[0], now - timedelta(hours=24))
+        end = parse_activity_bound((qs.get("to") or [None])[0], now)
+    except (ValueError, OSError, OverflowError):
+        return 400, {"error": "bad time"}
+    name = (qs.get("name") or [None])[0] or None
+    if not paths.DB.exists():
+        return 503, {"error": "smartlife.db not found"}
+    try:
+        conn = connect()
+    except Exception as exc:
+        log_error(f"activity_intervals {exc}")
+        return 503, {"error": "database"}
+    try:
+        ensure_columns(conn)
+        sql = """
+            SELECT d.name, i.kind, i.start_time, i.end_time
+            FROM activity_intervals i
+            JOIN devices d ON d.id = i.device_id
+            WHERE i.kind = 'occupied'
+              AND i.start_time < ? AND i.end_time > ?
+        """
+        args = [end, start]
+        if name:
+            sql += " AND d.name = ?"
+            args.append(name)
+        sql += " ORDER BY i.start_time ASC, d.name ASC"
+        rows = conn.execute(sql, args).fetchall()
+    except Exception as exc:
+        log_error(f"activity_intervals {exc}")
+        return 503, {"error": "database"}
+    finally:
+        conn.close()
+    return 200, [
+        {
+            "name": row["name"],
+            "kind": row["kind"],
+            "start_time": row["start_time"],
+            "end_time": row["end_time"],
+        }
+        for row in rows
+    ]
+
+
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -106,6 +160,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/readings":
             code, body = query_readings(parse_query(parsed.query))
+            self._send(code, body)
+            return
+        if parsed.path == "/activity_intervals":
+            code, body = query_activity_intervals(parse_query(parsed.query))
             self._send(code, body)
             return
         self._send(404, {"error": "not found"})
