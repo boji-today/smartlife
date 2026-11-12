@@ -10,7 +10,7 @@ python3 -m venv .venv
 cp .env.example .env
 ```
 
-`.env` 填写 Tuya IoT 云端凭据：
+`.env` 填写 Tuya IoT 云端凭据。local key 不放 `.env`，写在 `data/smartlife.db` 的 `devices` 表。`.env`、`data.sql`、`devices.json`、`tuya-raw.json`、`snapshot.json` 含密钥或 local key，不要提交。
 
 | 变量 | 说明 |
 |---|---|
@@ -24,8 +24,6 @@ cp .env.example .env
 | `HA_URL` | Home Assistant 实例根地址 |
 | `HA_TOKEN` | 个人资料页创建的长期访问令牌 |
 
-local key 不放 `.env`，和设备一一对应，写在 `data/smartlife.db` 的 `devices` 表。
-
 ## 拉取设备与 local key
 
 ```bash
@@ -35,71 +33,39 @@ set -a && source .env && set +a
   -region "$TUYA_API_REGION" -device "$TUYA_DEVICE_ID"
 ```
 
-成功后写入 `devices.json`、`tuya-raw.json`、`snapshot.json`。这些文件含 local key，不要提交。
+成功后写入 `devices.json`、`tuya-raw.json`、`snapshot.json`。
 
 云端返回 data center suspended 时，到 [iot.tuya.com](https://iot.tuya.com) 开通对应数据中心，或改 `TUYA_API_REGION`。
 
 ## 网络
 
-发现广播必须从对应网卡发出。本机 TUN/代理会让默认 `tinytuya scan` 选错出口。扫描要绑定实际网卡，广播到该网段的广播地址。网卡、网段和设备地址见 `AGENTS.local.md`。
+发现广播必须从对应网卡发出。本机 TUN/代理会让默认 `tinytuya scan` 选错出口。扫描要绑定实际网卡，广播到该网段的广播地址。网卡、网段和设备标识见 `AGENTS.local.md`。
 
 `-force` 逐 IP 扫描需要 `devices.json` 里已有 local key，否则 tinytuya 会关闭 force-scan。
 
-## 当前设备
-
-二氧化碳检测仪，品类 `co2bj`，`source=tuya`。地址、`biz_id` 和 product 见 `AGENTS.local.md`。
-
-| DPS | 列 | 含义 |
-|---|---|---|
-| 1 | `co2_state` | 状态 |
-| 2 | `co2_ppm` | 二氧化碳（ppm） |
-| 18 | `temp_c` | 温度（°C） |
-| 19 | `humidity` | 湿度（%） |
-| 15 | `battery` | 电量（%） |
-
-Honeywell H Max，品类 `kj`，协议 `3.4`，`source=tuya`。地址、`biz_id` 和 product 见 `AGENTS.local.md`。
-
-| DPS | code | 列 | 含义 |
-|---|---|---|---|
-| 1 | `switch` | `switch` | 开关，`0/1` |
-| 2 | `pm25` | `pm25` | PM2.5，1–999 |
-| 5 | `filter` | `filter_pct` | 滤芯使用率，0–100% |
-| 21 | `air_quality` | `air_quality` | `good` / `medium` / `severe` |
-| 22 | `fault` | `fault` | 故障位图，`e1` / `e2` / `e4` |
-
-本地 DPS `4`、`101`、`102`、`103`、`104`、`105` 不在云端规范里，只留在 `raw_json`。
-
-`source=ha` 与涂鸦在同一 cron 采集，`active=0` 的行跳过。餐厅米家智能温湿度计3 mini、主卧室温湿度计写入温度、湿度和电量；餐厅米家智能除湿机 50L 写入温度和当前湿度，电量为空；餐厅小米智能门铃3 与餐厅门窗传感器只写入电量，温度和湿度为空。
-
 ## 数据库
 
-`schema.sql` 建 `devices`、`readings` 及索引，提交仓库。`data.sql` 写入二氧化碳检测仪和 Honeywell H Max（含 local key），不提交。
+`schema.sql` 提交仓库。`data.sql` 不提交。
 
 ```bash
 mkdir -p data && cat schema.sql data.sql | sqlite3 data/smartlife.db
 ```
 
-`devices`：自增 `id`。`source` 与 `biz_id` 组成唯一键。`biz_name` 是原名称，`name` 供 Infinity 过滤。`source` 为 `tuya` 或 `ha`。`address`、`version`、`local_key` 可空。`room` 是所在房间，可空。`active` 为 1 时采集，0 不采集，缺省 1。`ha_domains` 只给 `source=ha`：空为 `sensor`、`humidifier`、`climate`，JSON 数组是白名单，`[]` 不采集。
-
-`readings`：`device_id` 是 `devices.id`，并冗余 `source`、`biz_id`。其余为 `ts`（UTC）、`co2_ppm`、`co2_state`、`temp_c`、`humidity`、`battery`、`switch`、`pm25`、`filter_pct`、`air_quality`、`fault`、`raw_json`。另一台设备的列为空。已有库在采集或查询时补 `readings` 列，以及 `devices` 的 `ha_domains`、`room`、`active`。
+`devices` 以 `source` 与 `biz_id` 为唯一键，`active=0` 不采集。`readings` 按设备写入对应列，其余为空。列定义见 `schema.sql`。
 
 ## 采集
 
-`collect.py` 是常驻进程，按 `COLLECT_CRON` 对齐到整分钟。只读 `devices` 里 `active=1` 的行，然后同时启动涂鸦和 HA，主流程等两边结束。任一路异常只记自己的 `collect.log`，不取消另一路。
-
-`source=tuya` 仍用 `collect_one()`，不加重试。`biz_id` 走本地协议。`co2bj` 写二氧化碳列，`kj` 写 H Max 列。写入时带上 `devices.id`、`source`、`biz_id`。进程内固定 2 个线程，多出的设备排队；每台单独连接，一台失败不影响另一台。
-
-`source=ha` 在单独线程里采集，不占用这 2 个线程，也不调用 `GET /api/states`。一条 WebSocket 连续发送 `config/device_registry/list`、`config/entity_registry/list` 和 `get_states`。连接失败或任一命令失败，整段会话重试一次，仍失败则不插入。归属只认 registry 的 `device_id`。`device_id` 不在 device registry、没有允许的实体、`ha_domains` 为 `[]` 或不是 JSON 数组时不插入。允许的实体至少一个就插入。`sensor` 的 `device_class` 为 `temperature`、`humidity`、`battery`、`carbon_dioxide`、`pm25` 时写入 `temp_c`、`humidity`、`battery`、`co2_ppm`、`pm25`。`humidifier` 的 `current_humidity` 写入 `humidity`，`climate` 的 `current_temperature` 写入 `temp_c`。sensor 优先于属性；高优先级没有可用数字才用下一级。同一优先级多个可用值则该列为空并记日志。`unknown`、`unavailable`、空、布尔和单位不符不写成数字。一个数值都没有时列为空，`raw_json` 仍是这些实体的 state。其他域不进数值列；写进 `ha_domains` 时只进入 `raw_json`。`event` 不进数值列。数值按返回保存，整数保持整数。其余指标列为 null。
-
-失败、库不存在或没有设备时只追加 `collect.log`，不插入读数。醒来时若已错过该整点，记 `missed`，不补写。
-
-`ha_event_selectors` 与 `ha_domains` 分开。前者是 JSON 数组，默认 `[]`，元素是 Entity Registry 里 `unique_id` 的后缀；空数组不采集事件历史。数值采集仍只看 `ha_domains`。事件采集只把 History 原样写入 `activity_events`，不解析 `state`，也不带事件类型参数。`activity_synced_until` 只表示原始 History 已持久化到这个 `last_updated` 上界。
-
-人在传感器 `category=pir1`。小米人体传感器2S 的 `room` 是厕所，小米人体传感器2S 2 的 `room` 是厨房。两行 `ha_domains` 为 `["sensor"]`，`ha_event_selectors` 为 `["motion_detected_e_2_1008"]`。电量仍进 `readings.battery`。有人区间在 `activity_intervals`，`kind` 只有 `occupied`：间隔小于 600 秒的有人事件合成一段，`start_time` 是第一条事件时间，`end_time` 在落库时写成最后一条加 600 秒。600 秒只在这个 occupied 计算里使用。查询不再加时间。空白不是无人。原始事件只在库里查，没有事件 API。查询时 `name` 用设备名，不用房间名。
+`collect.py` 按 `COLLECT_CRON` 常驻。只读 `active=1` 的行，涂鸦和 HA 并行，一路失败只记自己的 `collect.log`，不取消另一路。错过整点记 `missed`，不补写。失败、库不存在或没有设备时不插入读数。
 
 ```bash
 .venv/bin/python collect.py
 ```
+
+涂鸦固定 2 个线程，每台单独连接。品类 `co2bj` 写二氧化碳列，`kj` 写净化器列。
+
+HA 在单独线程采集，不占用这 2 个线程。归属只认 device registry。`device_class` 对上的写入数值列，对不上的只进 `raw_json`。`ha_domains` 为 `[]` 或不是 JSON 数组时不插入。
+
+`ha_event_selectors` 与 `ha_domains` 分开，默认 `[]` 不采集事件历史。事件原样写入 `activity_events`。人在传感器把间隔小于 600 秒的有人事件合成一段 `occupied`：`start_time` 是第一条事件时间，`end_time` 是最后一条加 600 秒。空白不是无人。查询用设备名，不再加这 600 秒。
 
 `collect2.py` 是限时长连接探测。只读 `devices` 里 `source=tuya` 的第一行，保持 TCP，大约每 12 秒发心跳，把设备主动推送的 DPS 打到标准输出。不写 `readings`，不提供 HTTP。默认听 600 秒。与 `collect.py` 或容器不要同时连接同一台设备。断线重连、内存快照和落库尚未实现，见脚本顶部 TODO。
 
@@ -124,41 +90,21 @@ docker compose -f compose.yml up -d --build
 - `GET /readings?from=${__from}&to=${__to}`，可加 `name`、`source`
 - `GET /activity_intervals?from=${__from}&to=${__to}`，可加 `name`、`kind`
 
-`/readings` 的 `from` / `to` 为 Unix 毫秒或 UTC ISO8601（`Z` 或 `+00:00`），缺省最近 24 小时，比较前截断到整秒。`name` 对应 `devices.name`，`source` 对应 `readings.source`，缺省不过滤。响应按 `ts` 升序，含 `name`、`source`、`co2_ppm`、`co2_state`、`temp_c`、`humidity`、`battery`、`switch`、`pm25`、`filter_pct`、`air_quality`、`fault`。不含 `device_id`、`biz_id`、`room`、local key 与 `raw_json`。
+`/readings` 的 `from` / `to` 为 Unix 毫秒或 UTC ISO8601（`Z` 或 `+00:00`），缺省最近 24 小时，比较前截断到整秒。`name` 对应 `devices.name`，`source` 对应 `readings.source`，缺省不过滤。响应按 `ts` 升序，不含 local key 与 `raw_json`。
 
-`/activity_intervals` 的 `from` / `to` 同样接受 Unix 毫秒或 UTC ISO8601，但保留亚秒，不走 `/readings` 的截断。缺省最近 24 小时。`name` 与 `kind` 缺省不过滤，传了则精确匹配。字段是 `name`、`kind`、`start_time`、`end_time`，不含 `room`。相交条件是 `start_time < to AND end_time > from`，不再加 600 秒，也不按同步检查点截断。
+`/activity_intervals` 的 `from` / `to` 同样接受 Unix 毫秒或 UTC ISO8601，但保留亚秒。缺省最近 24 小时。`name` 与 `kind` 缺省不过滤，传了则精确匹配。相交条件是 `start_time < to AND end_time > from`。
 
-Grafana 与容器同在 `grafana` 网络时，Infinity 使用类型 JSON、Parser Backend、Format Time series。URL：
-
-```text
-http://smartlife:8080/readings?from=${__from}&to=${__to}&name=米家智能温湿度计3 mini&source=ha
-http://smartlife:8080/readings?from=${__from}&to=${__to}&name=温湿度计&source=ha
-http://smartlife:8080/readings?from=${__from}&to=${__to}&name=米家智能除湿机 50L&source=ha
-http://smartlife:8080/readings?from=${__from}&to=${__to}&name=小米智能门铃3&source=ha
-http://smartlife:8080/readings?from=${__from}&to=${__to}&name=门窗传感器&source=ha
-```
-
-门铃与门窗传感器列：`ts` Time，`battery` Number，`name` `source` String。`temp_c` 与 `humidity` 为空。
-
-已有数据：
+Grafana 与容器同在 `grafana` 网络时，Infinity 使用类型 JSON、Parser Backend、Format Time series。
 
 ```text
-http://smartlife:8080/readings?from=${__from}&to=${__to}&name=二氧化碳检测仪&source=tuya
+http://smartlife:8080/readings?from=${__from}&to=${__to}&name=<devices.name>&source=<tuya|ha>
 ```
-
-列：`ts` Time，`co2_ppm` `temp_c` `humidity` `battery` Number，`name` `source` `co2_state` String。
-
-```text
-http://smartlife:8080/readings?from=${__from}&to=${__to}&name=Honeywell H Max&source=tuya
-```
-
-列：`ts` Time，`pm25` `filter_pct` `fault` `switch` Number，`name` `source` `air_quality` String。
 
 ## Home Assistant
 
-`ha_probe.py` 读 `.env`，以及 `devices` 里 `source=ha` 的行。`biz_id` 是 HA device id，输出标题用 `name`。只做 `GET /api/`、`GET /api/states`，以及 WebSocket 的 `config/area_registry/list`、`config/floor_registry/list`、`config/entity_registry/list`、`config/device_registry/list`。不调用服务，不落盘。
+`ha_probe.py` 只读探测，不调用服务，不落盘。
 
-`sync_ha_devices.py` 用同样的只读请求。给已有 `source=ha` 写入 `room`，把两个人在传感器的 `name` 和 `biz_name` 改成 HA 设备名，并在缺行时插入门窗传感器（`ha_domains` 为 `["sensor"]`，`active=1`）。不插入其他设备。门铃保持 `ha_domains` 为空。可重复执行。
+`sync_ha_devices.py` 用同样的只读请求。给已有 `source=ha` 写入 `room`，把人在传感器的名称改成 HA 设备名，并在缺行时插入门窗传感器。不插入其他设备。可重复执行。
 
 ```bash
 .venv/bin/python ha_probe.py
