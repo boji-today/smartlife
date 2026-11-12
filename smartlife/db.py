@@ -15,6 +15,8 @@ DEVICE_COLUMNS = (
     ("ha_domains", "TEXT"),
     ("ha_event_selectors", "TEXT NOT NULL DEFAULT '[]'"),
     ("activity_synced_until", "TEXT"),
+    ("room", "TEXT"),
+    ("active", "INTEGER NOT NULL DEFAULT 1"),
 )
 ACTIVITY_EVENTS_DDL = """
 CREATE TABLE IF NOT EXISTS activity_events (

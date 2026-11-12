@@ -14,6 +14,8 @@ CREATE TABLE IF NOT EXISTS devices (
   ha_domains TEXT, -- source=ha 的 domain 白名单；NULL 为 sensor、humidifier、climate
   ha_event_selectors TEXT NOT NULL DEFAULT '[]', -- unique_id 后缀；空数组不采集事件历史
   activity_synced_until TEXT, -- 原始 History 已持久化的 last_updated 上界，不表示区间已重算
+  room TEXT, -- 所在房间，可空
+  active INTEGER NOT NULL DEFAULT 1, -- 1 采集，0 不采集
   UNIQUE (source, biz_id)
 );
 

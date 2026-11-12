@@ -26,6 +26,7 @@ def collect():
             SELECT id, biz_id, source, address, version, local_key, category, ha_domains,
                    ha_event_selectors, activity_synced_until
             FROM devices
+            WHERE active = 1
             """
         ).fetchall()
         if not rows:

@@ -69,7 +69,7 @@ Honeywell H Max，品类 `kj`，协议 `3.4`，`source=tuya`。地址、`biz_id`
 
 本地 DPS `4`、`101`、`102`、`103`、`104`、`105` 不在云端规范里，只留在 `raw_json`。
 
-四台 `source=ha` 设备与涂鸦在同一 cron 采集：餐厅米家智能温湿度计3 mini、主卧室温湿度计写入温度、湿度和电量；餐厅米家智能除湿机 50L 写入温度和当前湿度，电量为空；餐厅小米智能门铃3 只写入电量，温度和湿度为空。
+`source=ha` 与涂鸦在同一 cron 采集，`active=0` 的行跳过。餐厅米家智能温湿度计3 mini、主卧室温湿度计写入温度、湿度和电量；餐厅米家智能除湿机 50L 写入温度和当前湿度，电量为空；餐厅小米智能门铃3 与餐厅门窗传感器只写入电量，温度和湿度为空。
 
 ## 数据库
 
@@ -79,13 +79,13 @@ Honeywell H Max，品类 `kj`，协议 `3.4`，`source=tuya`。地址、`biz_id`
 mkdir -p data && cat schema.sql data.sql | sqlite3 data/smartlife.db
 ```
 
-`devices`：自增 `id`。`source` 与 `biz_id` 组成唯一键。`biz_name` 是原名称，`name` 供 Infinity 过滤。`source` 为 `tuya` 或 `ha`。`address`、`version`、`local_key` 可空。`ha_domains` 只给 `source=ha`：空为 `sensor`、`humidifier`、`climate`，JSON 数组是白名单，`[]` 不采集。
+`devices`：自增 `id`。`source` 与 `biz_id` 组成唯一键。`biz_name` 是原名称，`name` 供 Infinity 过滤。`source` 为 `tuya` 或 `ha`。`address`、`version`、`local_key` 可空。`room` 是所在房间，可空。`active` 为 1 时采集，0 不采集，缺省 1。`ha_domains` 只给 `source=ha`：空为 `sensor`、`humidifier`、`climate`，JSON 数组是白名单，`[]` 不采集。
 
-`readings`：`device_id` 是 `devices.id`，并冗余 `source`、`biz_id`。其余为 `ts`（UTC）、`co2_ppm`、`co2_state`、`temp_c`、`humidity`、`battery`、`switch`、`pm25`、`filter_pct`、`air_quality`、`fault`、`raw_json`。另一台设备的列为空。已有库在采集或查询时补 `readings` 列和 `devices.ha_domains`。
+`readings`：`device_id` 是 `devices.id`，并冗余 `source`、`biz_id`。其余为 `ts`（UTC）、`co2_ppm`、`co2_state`、`temp_c`、`humidity`、`battery`、`switch`、`pm25`、`filter_pct`、`air_quality`、`fault`、`raw_json`。另一台设备的列为空。已有库在采集或查询时补 `readings` 列，以及 `devices` 的 `ha_domains`、`room`、`active`。
 
 ## 采集
 
-`collect.py` 是常驻进程，按 `COLLECT_CRON` 对齐到整分钟。读完 `devices` 后同时启动涂鸦和 HA，主流程等两边结束。任一路异常只记自己的 `collect.log`，不取消另一路。
+`collect.py` 是常驻进程，按 `COLLECT_CRON` 对齐到整分钟。只读 `devices` 里 `active=1` 的行，然后同时启动涂鸦和 HA，主流程等两边结束。任一路异常只记自己的 `collect.log`，不取消另一路。
 
 `source=tuya` 仍用 `collect_one()`，不加重试。`biz_id` 走本地协议。`co2bj` 写二氧化碳列，`kj` 写 H Max 列。写入时带上 `devices.id`、`source`、`biz_id`。进程内固定 2 个线程，多出的设备排队；每台单独连接，一台失败不影响另一台。
 
@@ -95,7 +95,7 @@ mkdir -p data && cat schema.sql data.sql | sqlite3 data/smartlife.db
 
 `ha_event_selectors` 与 `ha_domains` 分开。前者是 JSON 数组，默认 `[]`，元素是 Entity Registry 里 `unique_id` 的后缀；空数组不采集事件历史。数值采集仍只看 `ha_domains`。事件采集只把 History 原样写入 `activity_events`，不解析 `state`，也不带事件类型参数。`activity_synced_until` 只表示原始 History 已持久化到这个 `last_updated` 上界。
 
-人在传感器 `category=pir1`。厕所、厨房各一行，`ha_domains` 为 `["sensor"]`，`ha_event_selectors` 为 `["motion_detected_e_2_1008"]`。电量仍进 `readings.battery`。有人区间在 `activity_intervals`，`kind` 只有 `occupied`：间隔小于 600 秒的有人事件合成一段，`start_time` 是第一条事件时间，`end_time` 在落库时写成最后一条加 600 秒。600 秒只在这个 occupied 计算里使用。查询不再加时间。空白不是无人。原始事件只在库里查，没有事件 API。
+人在传感器 `category=pir1`。小米人体传感器2S 的 `room` 是厕所，小米人体传感器2S 2 的 `room` 是厨房。两行 `ha_domains` 为 `["sensor"]`，`ha_event_selectors` 为 `["motion_detected_e_2_1008"]`。电量仍进 `readings.battery`。有人区间在 `activity_intervals`，`kind` 只有 `occupied`：间隔小于 600 秒的有人事件合成一段，`start_time` 是第一条事件时间，`end_time` 在落库时写成最后一条加 600 秒。600 秒只在这个 occupied 计算里使用。查询不再加时间。空白不是无人。原始事件只在库里查，没有事件 API。查询时 `name` 用设备名，不用房间名。
 
 ```bash
 .venv/bin/python collect.py
@@ -130,9 +130,9 @@ docker compose -f compose.yml up -d --build
 - `GET /readings?from=${__from}&to=${__to}`，可加 `name`、`source`
 - `GET /activity_intervals?from=${__from}&to=${__to}`，可加 `name`、`kind`
 
-`/readings` 的 `from` / `to` 为 Unix 毫秒或 UTC ISO8601（`Z` 或 `+00:00`），缺省最近 24 小时，比较前截断到整秒。`name` 对应 `devices.name`，`source` 对应 `readings.source`，缺省不过滤。响应按 `ts` 升序，含 `name`、`source`、`co2_ppm`、`co2_state`、`temp_c`、`humidity`、`battery`、`switch`、`pm25`、`filter_pct`、`air_quality`、`fault`。不含 `device_id`、`biz_id`、local key 与 `raw_json`。
+`/readings` 的 `from` / `to` 为 Unix 毫秒或 UTC ISO8601（`Z` 或 `+00:00`），缺省最近 24 小时，比较前截断到整秒。`name` 对应 `devices.name`，`source` 对应 `readings.source`，缺省不过滤。响应按 `ts` 升序，含 `name`、`source`、`co2_ppm`、`co2_state`、`temp_c`、`humidity`、`battery`、`switch`、`pm25`、`filter_pct`、`air_quality`、`fault`。不含 `device_id`、`biz_id`、`room`、local key 与 `raw_json`。
 
-`/activity_intervals` 的 `from` / `to` 同样接受 Unix 毫秒或 UTC ISO8601，但保留亚秒，不走 `/readings` 的截断。缺省最近 24 小时。`name` 与 `kind` 缺省不过滤，传了则精确匹配。字段是 `name`、`kind`、`start_time`、`end_time`。相交条件是 `start_time < to AND end_time > from`，不再加 600 秒，也不按同步检查点截断。
+`/activity_intervals` 的 `from` / `to` 同样接受 Unix 毫秒或 UTC ISO8601，但保留亚秒，不走 `/readings` 的截断。缺省最近 24 小时。`name` 与 `kind` 缺省不过滤，传了则精确匹配。字段是 `name`、`kind`、`start_time`、`end_time`，不含 `room`。相交条件是 `start_time < to AND end_time > from`，不再加 600 秒，也不按同步检查点截断。
 
 Grafana 与容器同在 `grafana` 网络时，Infinity 使用类型 JSON、Parser Backend、Format Time series。URL：
 
@@ -141,9 +141,10 @@ http://smartlife:8080/readings?from=${__from}&to=${__to}&name=米家智能温湿
 http://smartlife:8080/readings?from=${__from}&to=${__to}&name=温湿度计&source=ha
 http://smartlife:8080/readings?from=${__from}&to=${__to}&name=米家智能除湿机 50L&source=ha
 http://smartlife:8080/readings?from=${__from}&to=${__to}&name=小米智能门铃3&source=ha
+http://smartlife:8080/readings?from=${__from}&to=${__to}&name=门窗传感器&source=ha
 ```
 
-门铃列：`ts` Time，`battery` Number，`name` `source` String。`temp_c` 与 `humidity` 为空。
+门铃与门窗传感器列：`ts` Time，`battery` Number，`name` `source` String。`temp_c` 与 `humidity` 为空。
 
 已有数据：
 
@@ -163,6 +164,9 @@ http://smartlife:8080/readings?from=${__from}&to=${__to}&name=Honeywell H Max&so
 
 `ha_probe.py` 读 `.env`，以及 `devices` 里 `source=ha` 的行。`biz_id` 是 HA device id，输出标题用 `name`。只做 `GET /api/`、`GET /api/states`，以及 WebSocket 的 `config/area_registry/list`、`config/floor_registry/list`、`config/entity_registry/list`、`config/device_registry/list`。不调用服务，不落盘。
 
+`sync_ha_devices.py` 用同样的只读请求。给已有 `source=ha` 写入 `room`，把两个人在传感器的 `name` 和 `biz_name` 改成 HA 设备名，并在缺行时插入门窗传感器（`ha_domains` 为 `["sensor"]`，`active=1`）。不插入其他设备。门铃保持 `ha_domains` 为空。可重复执行。
+
 ```bash
 .venv/bin/python ha_probe.py
+.venv/bin/python sync_ha_devices.py
 ```
