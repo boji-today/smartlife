@@ -108,12 +108,6 @@ mkdir -p data && cat schema.sql data.sql | sqlite3 data/smartlife.db
 .venv/bin/python collect2.py 600
 ```
 
-单次读取当前二氧化碳：
-
-```bash
-.venv/bin/python test_co2.py
-```
-
 Docker：
 
 ```bash
