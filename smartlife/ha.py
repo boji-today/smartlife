@@ -67,8 +67,15 @@ RULES = (
         "units": ("°C",),
         "priority": 1,
     },
+    {
+        "domain": "binary_sensor",
+        "device_class": "door",
+        "column": "switch",
+        "states": {"on": 1, "off": 0},
+        "priority": 0,
+    },
 )
-SHOW = ("co2_ppm", "temp_c", "humidity", "battery", "pm25")
+SHOW = ("co2_ppm", "temp_c", "humidity", "battery", "pm25", "switch")
 _logged = set()
 
 
@@ -146,6 +153,17 @@ def metric_value(state, rule):
         if not isinstance(state, dict) or "state" not in state:
             return None, "missing state"
         raw = state.get("state")
+    if "states" in rule:
+        if raw is None:
+            return None, "null"
+        if not isinstance(raw, str):
+            return None, "not on/off"
+        token = raw.strip()
+        if token in {"unknown", "unavailable"}:
+            return None, token
+        if token not in rule["states"]:
+            return None, "not on/off"
+        return rule["states"][token], None
     units = []
     for key in ("unit_of_measurement", "temperature_unit"):
         if key == "temperature_unit" and rule["column"] != "temp_c":

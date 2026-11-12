@@ -12,6 +12,7 @@ from smartlife.paths import configure, load_dotenv
 
 DOOR_NAME = "门窗传感器"
 DOORBELL_NAME = "小米智能门铃3"
+DOOR_DOMAINS = '["sensor","binary_sensor"]'
 
 
 def device_label(device):
@@ -110,7 +111,12 @@ def sync(conn, devices, entries_by_device, areas, state_by_id, updated_at):
               ha_domains, ha_event_selectors, updated_at
             ) VALUES (?, ?, ?, 'ha', ?, 1, ?, '[]', ?)
             """,
-            (door_id, door_label, door_label, door_room, '["sensor"]', updated_at),
+            (door_id, door_label, door_label, door_room, DOOR_DOMAINS, updated_at),
+        )
+    else:
+        conn.execute(
+            "UPDATE devices SET ha_domains = ? WHERE source = 'ha' AND biz_id = ?",
+            (DOOR_DOMAINS, door_id),
         )
 
     bell = conn.execute("SELECT * FROM devices WHERE id = ?", (doorbell_row["id"],)).fetchone()
@@ -120,7 +126,7 @@ def sync(conn, devices, entries_by_device, areas, state_by_id, updated_at):
     ).fetchone()
     if bell["ha_domains"] is not None or bell["active"] != 1:
         raise SystemExit("doorbell will not collect battery")
-    if stored is None or stored["active"] != 1 or stored["ha_domains"] != '["sensor"]':
+    if stored is None or stored["active"] != 1 or stored["ha_domains"] != DOOR_DOMAINS:
         raise SystemExit("door sensor will not collect battery")
     if stored["name"] != DOOR_NAME or not stored["room"]:
         raise SystemExit("door sensor fields")
