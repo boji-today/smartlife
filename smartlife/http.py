@@ -114,6 +114,7 @@ def query_activity_intervals(qs):
     except (ValueError, OSError, OverflowError):
         return 400, {"error": "bad time"}
     name = (qs.get("name") or [None])[0] or None
+    kind = (qs.get("kind") or [None])[0] or None
     if not paths.DB.exists():
         return 503, {"error": "smartlife.db not found"}
     try:
@@ -127,13 +128,15 @@ def query_activity_intervals(qs):
             SELECT d.name, i.kind, i.start_time, i.end_time
             FROM activity_intervals i
             JOIN devices d ON d.id = i.device_id
-            WHERE i.kind = 'occupied'
-              AND i.start_time < ? AND i.end_time > ?
+            WHERE i.start_time < ? AND i.end_time > ?
         """
         args = [end, start]
         if name:
             sql += " AND d.name = ?"
             args.append(name)
+        if kind:
+            sql += " AND i.kind = ?"
+            args.append(kind)
         sql += " ORDER BY i.start_time ASC, d.name ASC"
         rows = conn.execute(sql, args).fetchall()
     except Exception as exc:

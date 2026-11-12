@@ -128,11 +128,11 @@ docker compose -f compose.yml up -d --build
 
 - `GET /health`
 - `GET /readings?from=${__from}&to=${__to}`，可加 `name`、`source`
-- `GET /activity_intervals?from=${__from}&to=${__to}`，可加 `name`
+- `GET /activity_intervals?from=${__from}&to=${__to}`，可加 `name`、`kind`
 
 `/readings` 的 `from` / `to` 为 Unix 毫秒或 UTC ISO8601（`Z` 或 `+00:00`），缺省最近 24 小时，比较前截断到整秒。`name` 对应 `devices.name`，`source` 对应 `readings.source`，缺省不过滤。响应按 `ts` 升序，含 `name`、`source`、`co2_ppm`、`co2_state`、`temp_c`、`humidity`、`battery`、`switch`、`pm25`、`filter_pct`、`air_quality`、`fault`。不含 `device_id`、`biz_id`、local key 与 `raw_json`。
 
-`/activity_intervals` 的 `from` / `to` 同样接受 Unix 毫秒或 UTC ISO8601，但保留亚秒，不走 `/readings` 的截断。缺省最近 24 小时。只返回表内 `kind=occupied` 的行，字段是 `name`、`kind`、`start_time`、`end_time`。相交条件是 `start_time < to AND end_time > from`，不再加 600 秒，也不按同步检查点截断。
+`/activity_intervals` 的 `from` / `to` 同样接受 Unix 毫秒或 UTC ISO8601，但保留亚秒，不走 `/readings` 的截断。缺省最近 24 小时。`name` 与 `kind` 缺省不过滤，传了则精确匹配。字段是 `name`、`kind`、`start_time`、`end_time`。相交条件是 `start_time < to AND end_time > from`，不再加 600 秒，也不按同步检查点截断。
 
 Grafana 与容器同在 `grafana` 网络时，Infinity 使用类型 JSON、Parser Backend、Format Time series。URL：
 
